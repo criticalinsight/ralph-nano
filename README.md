@@ -8,14 +8,17 @@ Ralph-Nano is a high-performance, single-binary autonomous coding agent written 
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 [![Platform](https://img.shields.io/badge/platform-macos-lightgrey.svg)](https://www.apple.com/macos/)
 
-## 🚀 Key Features (v0.2.6)
+## 🚀 Key Features (v1.2.0)
 
-*   **Bimodal Roleplay**: Toggle between **Executor** (default) and **Supervisor** mode for high-level architectural guidance.
-*   **The Symbol Cannon**: Scans codebase for hierarchical symbols (signatures) to provide architectural context without implementational bloat.
-*   **Structured Directives**: Mandates JSON communication (`{ "directives": [...] }`) for zero-ambiguity coordination.
-*   **Task Compression**: Automatically archives completed tasks in `TASKS.md` to keep the context window lean.
-*   **Pro-Only Intelligence**: Consolidates architecture on `gemini-3-pro-preview` for maximum reasoning depth.
-*   **Persistent Autonomy**: The agent polls `TASKS.md` for new work, allowing for continuous integration.
+*   **Multi-Agent Swarm**: Spawn parallel "Worker Nanos" to handle independent subsystems concurrently.
+*   **Self-Evolution**: Dynamic tool generation via compiled `.wasm` plugins for specialized tasks.
+*   **Multimodal Vision**: Screenshot capture passed to LLM for visual UI verification.
+*   **Debate Loops**: Multi-persona LLM sessions to audit complex logic changes.
+*   **Rollback Snapshots**: Zero-cost restoration of workspace state via `.ralph/snapshots`.
+*   **Semantic Linting**: LLM-guided linting for catching logical API misuse.
+*   **Auto-Didact Engine**: Automatically learns your tech stack by scanning manifests and scraping official documentation.
+*   **Local RAG Re-ranking**: Uses `candle` engine to prune Top-50 vector hits down to Top-10 critical symbols.
+*   **Persistent Autonomy**: The agent polls `TASKS.md` for new work, enabling continuous integration.
 *   **Shadow Workspace**: Proposals are safely staged and verified in a sandbox before touching your source code.
 
 ## 🛠️ Quick Start

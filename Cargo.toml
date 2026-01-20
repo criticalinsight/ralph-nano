@@ -17,17 +17,18 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
+html2text = "0.6"
+scraper = "0.18"
+url = "2.5"
 
 # Database & Vectors
-lancedb = "0.18" # Keeping 0.18 as used previously, assuming compatibility
+cozo = { version = "0.7.6", features = ["storage-rocksdb"] }
 # fastembed = "4" # Removed in favor of Candle for Metal support
-candle-core = { version = "0.8.2" }
-candle-nn = "0.8.2"
-candle-transformers = "0.8.2"
+candle-core = { version = "0.9.0", features = ["metal"] }
+candle-nn = "0.9.0"
+candle-transformers = "0.9.0"
 tokenizers = { version = "0.19", features = ["onig"] }
 hf-hub = "0.4"
-arrow-array = "54"
-arrow-schema = "54"
 
 # Utilities
 walkdir = "2.5"
@@ -36,7 +37,8 @@ colored = "2.1"
 anyhow = "1.0"
 dotenvy = "0.15" # dotenv replacement for maintenance
 chrono = { version = "0.4", features = ["serde"] }
-rayon = "1.10"
+rayon = "=1.10.0"
+ndarray = "0.15.6"
 dirs = "5.0"
 futures = "0.3"
 uuid = { version = "1.8", features = ["v4"] }
@@ -45,6 +47,10 @@ similar = "2.4"
 syn = { version = "2.0", features = ["full", "extra-traits", "visit"] }
 quote = "1.0"
 base64 = "0.22"
+sha2 = "0.10"
+hex = "0.4"
+wasmtime = "29.0"
+wasmtime-wasi = { version = "29.0", features = ["preview1"] }
 
 # TUI Dashboard
 ratatui = "0.29"

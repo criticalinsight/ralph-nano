@@ -14,12 +14,18 @@ When you execute `cargo run --release`, the following initialization steps occur
     *   Instantiates the `GeminiClient`, setting up the direct HTTP connection to Google's Generative Language API.
 
 3.  **Memory Mounting**:
-    *   Connects to the embedded **LanceDB** instance at `.ralph/lancedb`.
-    *   **Schema Check**: Creates the `ralph_memories` table if it doesn't exist.
-    *   **Embedding Model**: Downloads and initializes `fastembed` (all-MiniLM-L6-v2) for local execution on CPU/Metal.
-    *   *Note*: This ensures zero-latency access to long-term memory.
+    *   Connects to the embedded **CozoDB** instance at `.ralph/cozo.db`.
+    *   **Schema Check**: Creates `library`, `nodes`, `edges`, and `cache` tables.
+    *   **Embedding Model**: Initializes `candle` (BERT) for local execution on CPU/Metal.
+    *   *Note*: This ensures zero-latency access to long-term memory and official documentation.
 
-4.  **Janitor Spawn**:
+4.  **Auto-Didact Engine Scan**:
+    *   **Manifest Detection**: Scans for `Cargo.toml`, `package.json`, `requirements.txt`, and `pyproject.toml`.
+    *   **Learning Phase**: Compares detected libraries against the `library` table.
+    *   **Ingestion**: If new libraries are found, Ralph performs a concurrent recursive scrape of `docs.rs`, `npmjs.com`, or `pypi.org`.
+    *   **Context Priming**: Vectorizes and stores API definitions for RAG injection.
+
+5.  **Janitor Spawn**:
     *   Launches the `janitor_task` as a detached `tokio` background thread to handle maintenance independently of the main loop.
 
 ## 2. The Main Loop (Persistent Autonomy)
@@ -40,7 +46,8 @@ Ralph-Nano v0.2.4 features **Persistent Autonomy**. The agent no longer exits af
 *   A comprehensive prompt is constructed:
     ```
     [SYSTEM_RULES]       <-- Behavioral directives & Safety Governor
-    [RETRIEVED_LESSONS]  <-- Vector context from LanceDB
+    [OFFICIAL_DOCS]      <-- Recursive context from the Auto-Didact library
+    [RETRIEVED_LESSONS]  <-- Vector context from CozoDB
     [FULL_CODEBASE]      <-- The raw source code
     [USER_INPUT]         <-- Task prompt or Polling status
     ```
@@ -65,7 +72,7 @@ Before modifying your files, Ralph speculative executes:
 The Janitor task runs concurrently, waking up every 5 minutes:
 
 *   **Pruning**: Deletes irrelevant memories to keep the index efficient.
-*   **Consolidation**: Checks if session history exceeds 20 turns. If so, it generates a "Lesson" summary, stores it in LanceDB, and clears the RAM buffer.
+*   **Consolidation**: Checks if session history exceeds 20 turns. If so, it generates a "Lesson" summary, stores it in CozoDB, and clears the RAM buffer.
 
 ---
 

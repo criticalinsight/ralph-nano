@@ -6,6 +6,7 @@ use std::path::Path;
 use std::fs;
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 const RALPH_DIR: &str = ".ralph";
 
@@ -14,15 +15,18 @@ pub struct WorkerStatus {
     pub id: String,
     pub state: WorkerState,
     pub current_task: Option<String>,
+    pub assigned_task: Option<String>,
     pub completed_tasks: usize,
+    pub subtasks_completed: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub enum WorkerState {
     Idle,
     Working,
     Errored,
     Stopped,
+    Syncing,
 }
 
 pub struct SwarmWorker {
@@ -40,7 +44,9 @@ impl SwarmWorker {
             id: id.to_string(),
             state: WorkerState::Idle,
             current_task: None,
+            assigned_task: None,
             completed_tasks: 0,
+            subtasks_completed: Vec::new(),
         };
         fs::write(worker_dir.join("status.json"), serde_json::to_string_pretty(&status)?)?;
         
@@ -58,6 +64,13 @@ impl SwarmWorker {
             id: id.to_string(),
             process: child,
         })
+    }
+
+    pub fn assign_task(&self, task: &str) -> Result<()> {
+        let worker_dir = Path::new(RALPH_DIR).join("swarm").join(&self.id);
+        let task_file = worker_dir.join("task.json");
+        fs::write(task_file, serde_json::to_string(&json!({ "objective": task }))?)?;
+        Ok(())
     }
     
     fn is_running(&mut self) -> bool {
@@ -97,6 +110,26 @@ impl SwarmManager {
             println!("🐝 Spawning worker: {}", id);
             let worker = SwarmWorker::spawn(&id, &self.workspace)?;
             self.workers.insert(id, worker);
+        }
+        Ok(())
+    }
+
+    pub fn delegate_tasks(&mut self, tasks: Vec<String>) -> Result<()> {
+        let statuses = self.poll_workers();
+        let mut idle_workers: Vec<String> = statuses.into_iter()
+            .filter(|s| s.state == WorkerState::Idle)
+            .map(|s| s.id)
+            .collect();
+
+        for task in tasks {
+            if let Some(worker_id) = idle_workers.pop() {
+                if let Some(worker) = self.workers.get(&worker_id) {
+                    println!("🐝 Delegating task to {}: {}", worker_id, task);
+                    worker.assign_task(&task)?;
+                }
+            } else {
+                break; // No more idle workers
+            }
         }
         Ok(())
     }

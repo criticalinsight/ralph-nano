@@ -29,8 +29,8 @@ To build the "vim of agents"—lightweight, incredibly fast, and powerful. It sh
 - **Feedback Loop**: "Reflexion Engine" that critiques plans before execution.
 
 ### 4.3 Memory System
-- **Vector Store**: Embedded LanceDB (no external database server).
-- **Embeddings**: `fastembed-rs` (All-MiniLM-L6-v2) running locally on CPU/Metal.
+- **Vector Store**: Embedded CozoDB (Relational-Graph-Vector hybrid, RocksDB storage).
+- **Embeddings**: `candle` (BERT) running locally on CPU/Metal.
 - **Background Hygiene**: "Janitor" task to prune stale context and summarize lessons.
 
 ### 4.4 Inputs & Outputs
@@ -60,12 +60,40 @@ To build the "vim of agents"—lightweight, incredibly fast, and powerful. It sh
   - **Structured Directives**: Mandates JSON output for clear coordination with executors.
   - **Task Compression**: Automatically archives completed tasks in `TASKS.md` after 5 completions.
 
-### 5.4 The Janitor
+### 5.4 The Auto-Didact Engine (Workspace Awareness)
+- **Goal**: Automatically learn the project's tech stack and ingest official documentation to prevent LLM hallucination.
+- **Mechanism**:
+  - **Manifest Scanning**: Automatically detects dependencies in `Cargo.toml`, `package.json`, `requirements.txt`, and `pyproject.toml`.
+  - **Recursive Ingestion**: Scrapes `docs.rs`, `npmjs.com`, and `pypi.org`, following module links for deep coverage.
+  - **Semantic Chunking**: Splits documentation into logical blocks (definitions, overviews, examples).
+  - **Weighted RAG**: Boosts the relevance of "definition" chunks during vector search for higher technical accuracy.
+
+### 5.5 The Janitor
 - **Goal**: Keep the agent's memory clean and efficient over long sessions.
 - **Mechanism**:
   - Background `tokio` task running every 5 minutes.
   - Prunes memories > 24h old with low access counts.
   - Summarizes sessions > 20 turns into "Lesson" vectors.
+
+### 5.6 Self-Evolution (WASM Plugins)
+- **Goal**: Allow Ralph to extend its own toolset by generating and executing high-performance utility code.
+- **Mechanism**:
+  - **Secure Sandbox**: Uses `wasmtime` for isolated, cross-platform execution.
+  - **Dynamic Compilation**: Ralph can generate Rust code, compile it to WASM, and call it as a native tool.
+  - **Isolation**: Plugins are restricted to the `.ralph/plugins` environment.
+
+### 5.7 Multi-Agent Swarm (Concurrency)
+- **Goal**: Drastically speed up large-scale refactors by parallelizing independent subtasks.
+- **Mechanism**:
+  - **Worker Nanos**: Specialized, isolated Ralph instances spawned as background processes.
+  - **Task Delegation**: The Supervisor partitions a complex objective into `task.json` files for workers.
+  - **Status Reporting**: Workers provide real-time updates via a shared status registry.
+
+### 5.8 Predictive Context (Active RAG)
+- **Goal**: Proactively load related code symbols before the LLM explicitly requests them.
+- **Mechanism**:
+  - **Graph Neighborhood**: Detects "hot" files and traverses the Knowledge Graph for their immediate neighbors.
+  - **Atomic Injection**: Injects related struct/function definitions into the prompt as `[PREDICTIVE_CONTEXT]`.
 
 ## 6. Success Metrics
 - **Startup Time**: < 100ms.
@@ -73,7 +101,8 @@ To build the "vim of agents"—lightweight, incredibly fast, and powerful. It sh
 - **Memory Footprint**: < 100MB (idle).
 - **Safety**: 0 accidental destructive commands executed in test suite thanks to Shadow Workspace.
 
-## 7. Future Considerations
-- **Local LLM Support**: Integration with `llama.cpp` for fully offline operation.
-- **MCP Integration**: Full client support for Model Context Protocol servers.
-- **TUI**: A rich terminal user interface using `ratatui`.
+## 7. Future Considerations (M2 Pro Performance)
+- **Metal-Accelerated RAG**: Offloading context filtering to the GPU for sub-50ms retrieval.
+- **Speculative Shadow-Verification**: Exploiting MacBook's multi-core performance to run parallel build/test checks.
+- **macOS Native Integration**: Menu bar shortcuts and system-level hotkeys for high-speed interaction.
+- **One-Click Rollbacks**: Differential state management for instant, zero-cost workspace restoration.

@@ -1,7 +1,7 @@
 //! Automated Benchmarking Module
 //!
 //! Runs benchmarks after performance-related changes, stores results
-//! in LanceDB, and tracks regressions over time.
+//! in local files, and tracks regressions over time.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use colored::*;
 use regex::Regex;
@@ -9,17 +9,24 @@ mod janitor;
 mod swarm;
 mod reflexion;
 mod fingerprint;
-mod debate;
 mod git_context;
 mod daemon;
 mod api_server;
 mod qa;
 mod benchmarker;
 mod replicator;
+mod knowledge;
+mod wasm_runtime;
+// Phase 6: Debate
+mod debate;
+mod lint;
 
 use mcp_client::McpManager;
 use memory::{Memory, GraphNode};
+use knowledge::KnowledgeEngine;
 use janitor::Janitor;
+use debate::{Debate, DebateRound, DebateSynthesis};
+use lint::{SemanticLinter, LintViolation};
 use serde_json::Value;
 use std::sync::Arc;
 use std::env;
@@ -36,6 +43,7 @@ use quote::ToTokens;
 use walkdir::WalkDir;
 use fs_extra::dir::CopyOptions;
 use similar::{ChangeTag, TextDiff};
+use sha2::{Sha256, Digest};
 
 // --- CONSTANTS ---
 const PRIMARY_MODEL: &str = "gemini-3-pro-preview";
@@ -107,6 +115,19 @@ impl Default for RalphConfig {
         }
     }
 }
+// --- TELEMETRY (Haptic Feedback) ---
+
+struct Telemetry;
+impl Telemetry {
+    fn notify(title: &str, message: &str) {
+        let script = format!("display notification \"{}\" with title \"{}\" sound name \"Hero\"", message, title);
+        let _ = Command::new("osascript").arg("-e").arg(script).spawn();
+    }
+
+    fn speak(text: &str) {
+        let _ = Command::new("say").arg(text).arg("-r").arg("220").spawn();
+    }
+}
 
 // --- CORTEX (The Brain) ---
 
@@ -114,10 +135,11 @@ struct Cortex {
     api_key: String,
     client: reqwest::Client,
     config: RalphConfig,
+    memory: Arc<Memory>,
 }
 
 impl Cortex {
-    fn new(config: RalphConfig) -> Result<Self> {
+    fn new(config: RalphConfig, memory: Arc<Memory>) -> Result<Self> {
         let api_key = env::var("GEMINI_API_KEY")
             .context("CRITICAL: GEMINI_API_KEY not found in .env or environment")?;
         
@@ -125,15 +147,76 @@ impl Cortex {
             api_key,
             client: reqwest::Client::new(),
             config,
+            memory,
         })
     }
 
-    async fn stream_api(&self, model: &str, prompt: &str) -> Result<impl futures::Stream<Item = Result<String>>> {
+    async fn create_context_cache(&self, context: &str) -> Result<String> {
+        let mut hasher = Sha256::new();
+        hasher.update(context.as_bytes());
+        let hash = hex::encode(hasher.finalize());
+
+        if let Ok(Some(cached_id)) = self.memory.get_kv_cache(&hash).await {
+            return Ok(cached_id);
+        }
+
+        println!("{}", "🧠 Creating Gemini Context Cache...".cyan());
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/cachedContents?key={}",
+            self.api_key
+        );
+        
+        // Context caching requires at least 32,768 tokens.
+        // For Nano, we'll try it if the context is large enough.
+        let payload = serde_json::json!({
+            "model": format!("models/{}", self.config.primary_model),
+            "contents": [{ "parts": [{ "text": context }] }],
+            "ttl": "3600s"
+        });
+
+        let res = self.client.post(&url).json(&payload).send().await?;
+        let status = res.status();
+        if !status.is_success() {
+             let err_text = res.text().await.unwrap_or_default();
+             return Err(anyhow!("Failed to create cache: {} - {}", status, err_text));
+        }
+
+        let val: Value = res.json().await?;
+        let cache_id = val["name"].as_str()
+            .context("Cache ID not found in response")?
+            .to_string();
+
+        let _ = self.memory.set_kv_cache(&hash, &cache_id).await;
+        Ok(cache_id)
+    }
+
+    async fn stream_api(&self, model: &str, prompt: &str, cache_id: Option<&str>, images: Option<Vec<String>>) -> Result<impl futures::Stream<Item = Result<String>>> {
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?key={}",
             model, self.api_key
         );
-        let payload = serde_json::json!({ "contents": [{ "parts": [{ "text": prompt }] }] });
+        
+        let mut parts = vec![serde_json::json!({ "text": prompt })];
+        
+        if let Some(imgs) = images {
+            for img_data in imgs {
+                parts.push(serde_json::json!({
+                    "inline_data": {
+                        "mime_type": "image/png",
+                        "data": img_data
+                    }
+                }));
+            }
+        }
+
+        let mut payload = serde_json::json!({
+            "contents": [{ "parts": parts }]
+        });
+
+        if let Some(cid) = cache_id {
+            payload.as_object_mut().unwrap().insert("cachedContent".to_string(), Value::String(cid.to_string()));
+        }
+
         let res = self.client.post(&url).json(&payload).send().await?;
         
         if res.status() == 429 { return Err(anyhow::anyhow!("RATE_LIMIT")); }
@@ -182,12 +265,18 @@ impl Cortex {
         Ok(stream.boxed())
     }
 
-    async fn stream_generate(&self, prompt: &str) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
+    async fn stream_generate(&self, prompt: &str, context: Option<&str>, images: Option<Vec<String>>) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
         use futures::StreamExt;
         
-        match self.stream_api(&self.config.primary_model, prompt).await {
+        let cache_id = if let Some(ctx) = context {
+            if ctx.len() > 10000 && images.is_none() { // Only cache text-only contexts for now
+                self.create_context_cache(ctx).await.ok()
+            } else { None }
+        } else { None };
+
+        match self.stream_api(&self.config.primary_model, prompt, cache_id.as_deref(), images.clone()).await {
             Ok(s) => Ok(s.boxed()),
-            Err(_) => match self.stream_api(&self.config.fallback_model, prompt).await {
+            Err(_) => match self.stream_api(&self.config.fallback_model, prompt, None, images).await {
                 Ok(s) => Ok(s.boxed()),
                 Err(_) => {
                     let s = self.stream_local_llm(prompt).await?;
@@ -238,11 +327,81 @@ impl Cortex {
 
         let res = self.client.post(&url).json(&payload).send().await?;
         let body: Value = res.json().await?;
-
-        body["candidates"][0]["content"]["parts"][0]["text"]
-            .as_str()
+        body["candidates"][0]["content"]["parts"][0]["text"].as_str()
             .map(|s| s.to_string())
             .context("No text in response")
+    }
+
+    /// Phase 6: Self-Correcting Debate
+    async fn conduct_debate(&self, topic: &str, context: &str) -> Result<DebateSynthesis> {
+        println!("{}", format!("\n⚖️  CONDUCTING DEBATE: {}", topic).yellow().bold());
+        
+        let debate = Debate::security_vs_performance();
+        let prompts = debate.generate_prompts(context, topic);
+        
+        // Run persona critiques in parallel
+        let mut rounds = Vec::new();
+        let mut handles = Vec::new();
+
+        for (persona_name, prompt) in prompts {
+            let model = self.config.primary_model.clone();
+            let p_name = persona_name.clone();
+            let cortex_ref = self.client.clone(); // Clone reqwest client (cheap)
+            let api_key = self.api_key.clone();
+
+            handles.push(tokio::spawn(async move {
+                // Inline generation to avoid referencing self across threads
+                let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}", model, api_key);
+                let payload = serde_json::json!({ "contents": [{"parts": [{"text": prompt}]}] });
+                
+                match cortex_ref.post(&url).json(&payload).send().await {
+                    Ok(res) => match res.json::<Value>().await {
+                        Ok(body) => {
+                            if let Some(text) = body["candidates"][0]["content"]["parts"][0]["text"].as_str() {
+                                return Some((p_name, text.to_string()));
+                            }
+                        },
+                        Err(_) => {}
+                    },
+                    Err(_) => {}
+                }
+                None
+            }));
+        }
+
+        for handle in handles {
+            if let Ok(Some((name, response))) = handle.await {
+                let round = Debate::parse_response(&name, &response);
+                println!("  🗣️  {}: Found {} issues.", name.cyan(), round.suggestions.len());
+                rounds.push(round);
+            }
+        }
+
+        Ok(Debate::synthesize(&rounds))
+    }
+
+    /// Phase 6: Semantic Linting
+    async fn perform_lint(&self, path: &str) -> Result<Vec<LintViolation>> {
+        println!("{}", format!("\n🕵️  LINTING: {}", path).yellow().bold());
+        
+        let code = if Path::new(path).exists() {
+            fs::read_to_string(path).unwrap_or_default()
+        } else {
+            return Err(anyhow::anyhow!("File not found: {}", path));
+        };
+
+        if code.is_empty() { return Ok(vec![]); }
+
+        // Get context from graph for this file
+        let context = match self.memory.get_neighborhood(path).await {
+            Ok(neighbors) => neighbors.join("\n"),
+            Err(_) => String::new(),
+        };
+
+        let prompt = SemanticLinter::lint_prompt(&code, &context);
+        let response = self.generate_sync(&self.config.primary_model, &prompt).await?;
+        
+        Ok(SemanticLinter::parse_response(&response))
     }
 }
 
@@ -442,7 +601,7 @@ impl Tools {
                         path: path.to_string_lossy().to_string(),
                         edges: data.dependencies.clone(),
                     };
-                    if let Err(e) = memory.add_node(node).await {
+                    if let Err(e) = memory.add_node(&node).await {
                         eprintln!("Failed to index symbol {}: {}", sym, e);
                     }
                 }
@@ -809,6 +968,11 @@ enum Action {
     ReadUrl(String),
     SearchWeb(String),
     CaptureUI(Option<String>),
+    CallWasm(String, Vec<i32>), // function name, args
+    Debate(String), // topic/proposal
+    Snapshot(String), // label
+    Restore(String), // id
+    Lint(String), // path
 }
 
 fn extract_code_blocks(response: &str) -> Vec<Action> {
@@ -897,6 +1061,32 @@ fn extract_code_blocks(response: &str) -> Vec<Action> {
         if lang == "capture" {
             actions.push(Action::CaptureUI(Some(content.trim().to_string())));
         }
+
+        if lang == "wasm" {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(content) {
+                let func = val["function"].as_str().unwrap_or("run").to_string();
+                let args = val["args"].as_array().unwrap_or(&vec![]).iter()
+                    .filter_map(|v| v.as_i64().map(|i| i as i32))
+                    .collect();
+                actions.push(Action::CallWasm(func, args));
+            }
+        }
+
+        if lang == "debate" {
+             actions.push(Action::Debate(content.trim().to_string()));
+        }
+
+        if lang == "snapshot" {
+            actions.push(Action::Snapshot(content.trim().to_string()));
+        }
+    
+        if lang == "restore" {
+            actions.push(Action::Restore(content.trim().to_string()));
+        }
+
+        if lang == "lint" {
+            actions.push(Action::Lint(content.trim().to_string()));
+        }
     }
     actions
 }
@@ -933,56 +1123,64 @@ async fn run_worker_loop() -> Result<()> {
     let config_str = fs::read_to_string(&config_path).unwrap_or_default();
     let config: RalphConfig = toml::from_str(&config_str).unwrap_or_default();
     
-    let cortex = Cortex::new(config)?;
     let memory = Arc::new(Memory::new(&format!("{}/lancedb", RALPH_DIR)).await?);
+    let cortex = Cortex::new(config, Arc::clone(&memory))?;
     
     let status_path = format!("{}/swarm/{}/status.json", RALPH_DIR, worker_id);
-    let task_path = format!("{}/swarm/{}/task.txt", RALPH_DIR, worker_id);
+    let task_path = format!("{}/swarm/{}/task.json", RALPH_DIR, worker_id);
+    
+    let mut completed_tasks_count = 0;
     
     loop {
         // Check for a task file
         if Path::new(&task_path).exists() {
-            let task = fs::read_to_string(&task_path)?;
-            if !task.trim().is_empty() {
-                println!("🐝 Worker {} executing: {}", worker_id, task.trim());
-                
-                // Update status to Working
-                let status = swarm::WorkerStatus {
-                    id: worker_id.clone(),
-                    state: swarm::WorkerState::Working,
-                    current_task: Some(task.trim().to_string()),
-                    completed_tasks: 0,
-                };
-                fs::write(&status_path, serde_json::to_string_pretty(&status)?)?;
-                
-                // Execute the task (simplified: just call LLM)
-                let prompt = format!("Execute this task autonomously:\n{}", task);
-                if let Ok(mut stream) = cortex.stream_generate(&prompt).await {
-                    let mut response = String::new();
-                    while let Some(chunk) = stream.next().await {
-                        if let Ok(token) = chunk { response.push_str(&token); }
+            if let Ok(content) = fs::read_to_string(&task_path) {
+                if let Ok(task_val) = serde_json::from_str::<Value>(&content) {
+                    let task = task_val["objective"].as_str().unwrap_or_default().to_string();
+                    if !task.is_empty() {
+                        println!("🐝 Worker {} executing: {}", worker_id, task);
+                        
+                        // Update status to Working
+                        let status = swarm::WorkerStatus {
+                            id: worker_id.clone(),
+                            state: swarm::WorkerState::Working,
+                            current_task: Some(task.clone()),
+                            assigned_task: Some(task.clone()),
+                            completed_tasks: completed_tasks_count,
+                            subtasks_completed: Vec::new(),
+                        };
+                        let _ = fs::write(&status_path, serde_json::to_string_pretty(&status).unwrap_or_default());
+                        
+                        // Execute the task
+                        let prompt = format!("Execute this task autonomously:\n{}", task);
+                        if let Ok(mut stream) = cortex.stream_generate(&prompt, None, None).await {
+                             let mut response = String::new();
+                             while let Some(chunk) = stream.next().await {
+                                 if let Ok(token) = chunk { response.push_str(&token); }
+                             }
+                             println!("✅ Worker {} COMPLETED task.", worker_id);
+                             completed_tasks_count += 1;
+                             
+                             // Report completion in status
+                             let final_status = swarm::WorkerStatus {
+                                 id: worker_id.clone(),
+                                 state: swarm::WorkerState::Idle,
+                                 current_task: None,
+                                 assigned_task: None,
+                                 completed_tasks: completed_tasks_count,
+                                 subtasks_completed: vec![task.clone()],
+                             };
+                             let _ = fs::write(&status_path, serde_json::to_string_pretty(&final_status).unwrap_or_default());
+                        }
+                        
+                        // Remove task file to signal completion
+                        let _ = fs::remove_file(&task_path);
                     }
-                    println!("🐝 Worker {} completed task.", worker_id);
-                    
-                    // Store result and cache
-                    let _ = memory.store_cache(&task, &response).await;
                 }
-                
-                // Clear task file
-                fs::remove_file(&task_path)?;
-                
-                // Update status to Idle
-                let status = swarm::WorkerStatus {
-                    id: worker_id.clone(),
-                    state: swarm::WorkerState::Idle,
-                    current_task: None,
-                    completed_tasks: 1,
-                };
-                fs::write(&status_path, serde_json::to_string_pretty(&status)?)?;
             }
         }
         
-        sleep(Duration::from_millis(500)).await;
+        sleep(Duration::from_secs(2)).await;
     }
 }
 
@@ -1001,12 +1199,8 @@ async fn main() -> Result<()> {
     let config_str = fs::read_to_string(&config_path).context(format!("Could not read config at {}", config_path))?;
     let config: RalphConfig = toml::from_str(&config_str)?;
     
-    let cortex = Cortex::new(config)?;
-    
-    println!("{}", "⚡ RALPH-NANO v0.2.4: ONLINE".green().bold());
-    if cortex.config.autonomous_mode {
-        println!("{}", "⚠️ WARNING: AUTONOMOUS MODE ENABLED".yellow().bold());
-    }
+    let memory = Arc::new(Memory::new(&format!("{}/lancedb", RALPH_DIR)).await?);
+    let cortex = Cortex::new(config, Arc::clone(&memory))?;
     
     let mut loop_count = 0;
     let mut last_output = String::new();
@@ -1014,10 +1208,19 @@ async fn main() -> Result<()> {
     let mut context_manager = ContextManager::new();
     let mut hot_check = HotCheck::new();
     let mut mcp_manager = McpManager::new();
-    let memory = Arc::new(Memory::new(&format!("{}/lancedb", RALPH_DIR)).await?);
+    let mut wasm_runtime = wasm_runtime::WasmRuntime::new();
+    let mut last_captured_image: Option<String> = None;
+
+    println!("{}", "⚡ RALPH-NANO v0.2.4: ONLINE".green().bold());
+    Telemetry::speak("Ralph Nano is online.");
+    if cortex.config.autonomous_mode {
+        println!("{}", "⚠️ WARNING: AUTONOMOUS MODE ENABLED".yellow().bold());
+        Telemetry::notify("Autonomy Active", "Ralph is operating in headless mode.");
+    }
+    
+    let mut swarm_manager = swarm::SwarmManager::new(Path::new("."));
 
     // Initialize Swarm Manager for parallel task execution
-    let mut swarm_manager = swarm::SwarmManager::new(Path::new("."));
     if cortex.config.autonomous_mode {
         println!("{}", "🐝 Spawning worker swarm...".cyan());
         if let Err(e) = swarm_manager.spawn_workers(3) {
@@ -1030,6 +1233,30 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         if let Err(e) = Tools::sync_graph(Path::new("."), &memory_sync).await {
             eprintln!("Initial graph sync failed: {}", e);
+        }
+    });
+
+    // --- AUTO-DIDACT: Knowledge Engine & Learning Phase ---
+    let knowledge = KnowledgeEngine::new(Arc::clone(&memory));
+    let knowledge_sync = knowledge.clone();
+    let _autonomous_learning = cortex.config.autonomous_mode;
+    
+    tokio::spawn(async move {
+        sleep(Duration::from_secs(5)).await; // Wait for core boot to finish
+        println!("🧠 Auto-Didact Phase: Scanning for documentation...");
+        if let Err(e) = knowledge_sync.ingest_workspace(Path::new(".")).await {
+            eprintln!("Auto-Didact ingestion failed: {}", e);
+        }
+        
+        // --- REGISTRY MONITOR ---
+        if let Ok(updates) = knowledge_sync.check_library_updates().await {
+            if !updates.is_empty() {
+                println!("\n🔔 {}", "REGISTRY UPDATES AVAILABLE:".yellow().bold());
+                for (lib, _local, latest) in updates {
+                    println!("  * {} has version {} available.", lib.cyan(), latest.green());
+                }
+                Telemetry::notify("Documentation Updates", "New library versions are available in the registry.");
+            }
         }
     });
 
@@ -1077,6 +1304,50 @@ async fn main() -> Result<()> {
         }
     }
 
+    // --- AUTO-DIDACT: Knowledge Engine Scan ---
+    let knowledge = KnowledgeEngine::new(Arc::clone(&memory));
+    if let Ok(libs) = knowledge.scan_all_dependencies() {
+        let known_libs = memory.get_known_libraries().await.unwrap_or_default();
+        let missing_libs: Vec<_> = libs.iter()
+            .filter(|l| !known_libs.contains(&l.name))
+            .collect();
+            
+        if !missing_libs.is_empty() {
+            if cortex.config.autonomous_mode {
+                for lib in missing_libs {
+                    let _ = knowledge.ingest_library(lib).await;
+                }
+            } else {
+                print!("📚 Found new libraries: {}. Ingest docs? [y/N]: ", 
+                    missing_libs.iter().map(|l| l.name.as_str()).collect::<Vec<_>>().join(", ").cyan());
+                io::stdout().flush()?;
+                let mut confirm = String::new();
+                io::stdin().read_line(&mut confirm)?;
+                if confirm.trim().eq_ignore_ascii_case("y") {
+                    for lib in missing_libs {
+                        let _ = knowledge.ingest_library(lib).await;
+                    }
+                }
+            }
+        }
+    }
+
+    // --- REGISTRY MONITOR ---
+    let knowledge_sync = knowledge.clone();
+    tokio::spawn(async move {
+        sleep(Duration::from_secs(10)).await; // Wait for initial boot spikes to settle
+        if let Ok(updates) = knowledge_sync.check_library_updates().await {
+            let updates: Vec<(String, String, String)> = updates;
+            if !updates.is_empty() {
+                println!("\n🔔 {}", "REGISTRY UPDATES AVAILABLE:".yellow().bold());
+                for (lib, _local, latest) in updates {
+                    println!("  * {} has version {} available.", lib.cyan(), latest.green());
+                }
+                Telemetry::notify("Documentation Updates", "New library versions are available in the registry.");
+            }
+        }
+    });
+
     loop {
         // POLLING STOP CONDITION
         if Tools::check_all_tasks_complete() {
@@ -1092,6 +1363,7 @@ async fn main() -> Result<()> {
         // Resume from idle
         if idle_announced {
             println!("{}", "🚀 New tasks detected! Resuming autonomy...".green());
+            Telemetry::speak("New tasks detected. Resuming autonomy.");
             idle_announced = false;
         }
 
@@ -1100,6 +1372,8 @@ async fn main() -> Result<()> {
             loop_count += 1;
             if loop_count > cortex.config.max_autonomous_loops {
                 println!("{}", "\n🛑 MAX AUTONOMOUS LOOPS REACHED. STOPPING.".red().bold());
+                Telemetry::notify("Circuit Breaker", "Max loop count reached. Stopping safely.");
+                Telemetry::speak("Autonomous loop capacity reached. Shutting down.");
                 break;
             }
             println!("\n🌀 Loop {}/{}", loop_count, cortex.config.max_autonomous_loops);
@@ -1129,9 +1403,10 @@ async fn main() -> Result<()> {
         let config_clone = cortex.config.clone();
         let hot_list = context_manager.hot_files.keys().cloned().collect::<Vec<_>>();
         
+        let hot_list_sync = hot_list.clone();
         let context_handle = tokio::spawn(async move {
             let mut temp_manager = ContextManager::new();
-            for f in hot_list { temp_manager.mark_hot(&f); }
+            for f in hot_list_sync { temp_manager.mark_hot(&f); }
 
             if config_clone.role == RalphRole::Supervisor {
                 Tools::scan_symbols(Path::new("."))
@@ -1164,6 +1439,31 @@ async fn main() -> Result<()> {
 
         let context = context_handle.await.context("Context scan failed")?;
         
+        // --- AUTO-DIDACT: Search Official Docs (with Re-ranking) ---
+        let mut docs_context = String::new();
+        // Phase 5: Fetch more candidates (20) and re-rank locally to top 3
+        if let Ok(candidates) = memory.search_library(&input, 20).await {
+            if !candidates.is_empty() {
+                let docs = match memory.rerank(&input, candidates, 3).await {
+                    Ok(ranked) => ranked,
+                    Err(e) => {
+                        eprintln!("Re-ranking failed: {}, falling back to raw search.", e);
+                        memory.search_library(&input, 3).await.unwrap_or_default()
+                    }
+                };
+
+                if !docs.is_empty() {
+                    println!("\n📚 {}", "OFFICIAL DOCS CONTEXT (RE-RANKED):".cyan().bold());
+                    docs_context.push_str("[OFFICIAL_DOCS_CONTEXT]\n");
+                    for doc in &docs {
+                        println!("  * Found relevant documentation chunk.");
+                        docs_context.push_str(&format!("- {}\n", doc));
+                    }
+                    docs_context.push('\n');
+                }
+            }
+        }
+        
         // Gather MCP Tools
         let mut mcp_context = String::new();
         if let Ok(all_tools) = mcp_manager.get_all_tools().await {
@@ -1176,19 +1476,34 @@ async fn main() -> Result<()> {
             }
         }
 
-        let base_prompt = format!(
+        // --- PREDICTIVE CONTEXT: Graph Neighborhood ---
+        let mut predictive_context = String::new();
+        if !hot_list.is_empty() {
+             for f in hot_list.iter().take(3) {
+                 if let Ok(neighbors) = memory.get_neighborhood(f).await {
+                     if !neighbors.is_empty() {
+                         predictive_context.push_str(&format!("\nPREDICTIVE CONTEXT for {}:\n", f));
+                         for n in neighbors {
+                             predictive_context.push_str(&format!("- {}\n", n));
+                         }
+                     }
+                 }
+             }
+        }
+
+        let cacheable_context = format!(
             "SYSTEM: You are Ralph, acting as a {} for an autonomous engineering system (Antigravity).\n\
              PROJECT TYPE: {}\n{}\
              WORKSPACE CONTEXT:\n{}\n\n\
-             {}{}{}USER REQUEST/STATUS: {}\n\n", 
+             {}{}{}{}",
              if cortex.config.role == RalphRole::Supervisor { "TECHNICAL SUPERVISOR" } else { "AUTONOMOUS EXECUTOR" },
              fingerprint.specialized_prompt(),
              if !fingerprint.dependency_context().is_empty() { format!("{}\n", fingerprint.dependency_context()) } else { String::new() },
              context, 
              if !mcp_context.is_empty() { format!("AVAILABLE MCP TOOLS:\n{}\n\n", mcp_context) } else { String::new() },
              if !heuristics_context.is_empty() { format!("LEARNED HEURISTICS:\n{}\n", heuristics_context) } else { String::new() },
-             "",
-             input
+             docs_context,
+             if !predictive_context.is_empty() { format!("PREDICTIVE GRAPH CONTEXT:\n{}\n", predictive_context) } else { String::new() }
         );
 
         let instructions = if cortex.config.role == RalphRole::Supervisor {
@@ -1215,18 +1530,26 @@ async fn main() -> Result<()> {
              3. Mark tasks complete by saying 'task is complete'.\n"
         };
 
-        // Apply prompt compression if needed
-        let prompt_raw = format!("{}{}", base_prompt, instructions);
-        let prompt = cortex.compress_prompt(&prompt_raw).await.unwrap_or(prompt_raw);
-
+        let dynamic_query = format!("USER REQUEST/STATUS: {}\n\n{}", input, instructions);
+        
         // Check semantic cache first
-        let cached_response = memory.check_cache(&prompt).await.ok().flatten();
-        let (response, from_cache) = if let Some(cached) = cached_response {
+        let full_prompt = format!("{}\n{}", cacheable_context, dynamic_query);
+        let cached_response = memory.check_cache(&full_prompt).await.ok().flatten();
+        let (response, _from_cache) = if let Some(cached) = cached_response {
             println!("{}", "⚡ Cache Hit! Using stored response...".green());
             (cached, true)
         } else {
             println!("{}", "thinking...".dimmed());
-            let mut stream = cortex.stream_generate(&prompt).await?;
+            let images = if let Some(path) = &last_captured_image {
+                if let Ok(b64) = Tools::read_capture_as_base64(path) {
+                    Some(vec![b64])
+                } else { None }
+            } else { None };
+
+            let mut stream = cortex.stream_generate(&dynamic_query, Some(&cacheable_context), images).await?;
+            // Clear used image
+            last_captured_image = None;
+
             let mut resp = String::new();
             while let Some(chunk) = stream.next().await {
                 let token = chunk?;
@@ -1235,7 +1558,7 @@ async fn main() -> Result<()> {
                 resp.push_str(&token);
             }
             // Store in cache for future use
-            let _ = memory.store_cache(&prompt, &resp).await;
+            let _ = memory.store_cache(&full_prompt, &resp).await;
             (resp, false)
         };
 
@@ -1244,7 +1567,7 @@ async fn main() -> Result<()> {
 
         // Parse all actions from response (works for both cached and fresh)
         let actions = parser.push(&response);
-        for action in actions {
+        for action in &actions {
             match action {
                 Action::WriteFile(path, content) => {
                     if cortex.config.role == RalphRole::Executor {
@@ -1262,7 +1585,7 @@ async fn main() -> Result<()> {
                     },
                     Action::CallMcpTool(server, tool, args) => {
                         println!("\n🔌 Calling MCP Tool: {}/{}...", server.cyan(), tool.cyan());
-                        match mcp_manager.call_tool(&server, &tool, args).await {
+                        match mcp_manager.call_tool(&server, &tool, args.clone()).await {
                              Ok(res) => {
                                  println!("✅ MCP Result: {}", serde_json::to_string_pretty(&res).unwrap_or_default().dimmed());
                                  last_output.push_str(&format!("MCP Tool {} output: {}\n", tool, res));
@@ -1296,12 +1619,34 @@ async fn main() -> Result<()> {
                             Ok(path) => {
                                 println!("✅ Capture saved: {}", path.cyan());
                                 last_output.push_str(&format!("Visual Capture saved to: {}\nAnalyze this screenshot for visual verification.\n", path));
+                                last_captured_image = Some(path);
                             },
-                            Err(e) => println!("❌ Capture failed: {}", e),
+                        Err(e) => println!("❌ Capture failed: {}", e),
                         }
+                    },
+                    Action::CallWasm(func, args) => {
+                        println!("\n🧬 Calling WASM Plugin: {}...", func.cyan());
+                        // For MVP: Search for .wasm files in .ralph/plugins
+                        let plugin_path = format!("{}/plugins/{}.wasm", RALPH_DIR, func);
+                        if Path::new(&plugin_path).exists() {
+                            if let Ok(wasm_bytes) = fs::read(&plugin_path) {
+                                match wasm_runtime.execute(&wasm_bytes, &func, args.clone()) {
+                                    Ok(res) => {
+                                        println!("✅ WASM Result: {}", res);
+                                        last_output.push_str(&format!("WASM Tool {} output: {}\n", func, res));
+                                    },
+                                    Err(e) => println!("❌ WASM execution error: {}", e),
+                                }
+                            }
+                        } else {
+                            println!("❌ WASM Plugin not found: {}", plugin_path);
+                        }
+                    },
+                    Action::Debate(_) | Action::Snapshot(_) | Action::Restore(_) | Action::Lint(_) => {
+                        // These are handled in the final pass after streaming
                     }
-                }
             }
+        }
 
         println!("\n{}", "------------------------------------------------".dimmed());
 
@@ -1349,8 +1694,6 @@ async fn main() -> Result<()> {
                     }
                 },
                 Action::CallMcpTool(server, tool, _args) => {
-                    // Handled in stream, but for final pass we can log or re-exec if needed
-                    // Usually we don't want to re-exec destructive tools
                     println!("🏁 Final Pass: MCP Tool {}/{} noted.", server, tool);
                 },
                 Action::ReadUrl(url) => {
@@ -1359,9 +1702,77 @@ async fn main() -> Result<()> {
                 Action::SearchWeb(query) => {
                     println!("🏁 Final Pass: Search '{}' noted.", query);
                 },
-                Action::CaptureUI(_) => {
-                    println!("🏁 Final Pass: UI Capture noted.");
+                Action::CaptureUI(desc) => {
+                    println!("🏁 Final Pass: Capture '{}' noted.", desc.unwrap_or_default());
+                },
+                Action::CallWasm(func, _args) => {
+                    println!("🏁 Final Pass: WASM Tool '{}' noted.", func);
+                },
+                Action::Debate(topic) => {
+                     println!("🏁 Final Pass: Debate '{}' noted.", topic);
+                },
+                Action::Snapshot(label) => {
+                    let replicator = replicator::Replicator::new().unwrap();
+                    match replicator.create_snapshot(&label) {
+                        Ok(id) => println!("✅ Snapshot created: {}", id.green()),
+                        Err(e) => println!("❌ Snapshot failed: {}", e),
+                    }
+                },
+                Action::Restore(id) => {
+                    let replicator = replicator::Replicator::new().unwrap();
+                    match replicator.restore_snapshot(&id) {
+                        Ok(_) => println!("✅ System restored to {}", id.green()),
+                        Err(e) => println!("❌ Restore failed: {}", e),
+                    }
+                },
+                Action::Lint(path) => {
+                    if let Ok(violations) = cortex.perform_lint(&path).await {
+                        if violations.is_empty() {
+                            println!("✅ No semantic issues found in {}", path.green());
+                        } else {
+                            println!("\n🚨 {}", "SEMANTIC ISSUES FOUND:".red().bold());
+                            for v in &violations {
+                                let severity = match v.severity {
+                                    lint::LintSeverity::Critical => "CRITICAL".red().bold(),
+                                    lint::LintSeverity::Warning => "WARNING".yellow(),
+                                    lint::LintSeverity::Suggestion => "SUGGESTION".blue(),
+                                };
+                                println!("  [{}] {}:{} - {}", severity, v.file, v.line, v.message);
+                                if let Some(sugg) = &v.suggestion {
+                                    println!("    👉 {}", sugg.dimmed());
+                                }
+                            }
+                            
+                            // Auto-save violations to memory context for next turn
+                            let report = format!("Linting report for {}: Found {} issues.", path, violations.len());
+                            let _ = memory.store_lesson(&report).await;
+                        }
+                    }
+                },
+                _ => {} // Handle remaining actions or new variants
+            }
+        }
+        
+        // Handle Debates triggered during streaming or final pass
+        // We do this after the loop to avoid nesting async calls in the loop
+        let debate_actions: Vec<_> = actions.iter().filter_map(|a| if let Action::Debate(t) = a { Some(t.clone()) } else { None }).collect();
+        for topic in debate_actions {
+            if let Ok(synthesis) = cortex.conduct_debate(&topic, &input).await {
+                println!("\n📜 {}", "DEBATE VERDICT:".yellow().bold());
+                println!("SUMMARY: {}", synthesis.summary);
+                println!("RECOMMENDATION: {}", synthesis.final_recommendation.bold());
+                
+                if !synthesis.action_items.is_empty() {
+                    println!("\nREQUIRED ACTIONS:");
+                    for item in synthesis.action_items {
+                        println!("  [{}] {}", if item.priority == 1 { "CRITICAL".red() } else { "SUGGESTED".cyan() }, item.description);
+                    }
                 }
+
+                // If critical, we might want to feed this back into memory or stop execution.
+                // For now, we store it as a lesson.
+                let lesson = format!("DEBATE DECISION on '{}': {}", topic, synthesis.final_recommendation);
+                let _ = memory.store_lesson(&lesson).await;
             }
         }
         
@@ -1373,7 +1784,7 @@ async fn main() -> Result<()> {
         if cortex.config.autonomous_mode {
             let history = format!("User: {}\nRalph: {}", input, response);
             let janitor_prompt = format!("{}\n\nCONVERSATION:\n{}", Janitor::extraction_prompt(), history);
-            if let Ok(mut stream) = cortex.stream_generate(&janitor_prompt).await {
+            if let Ok(mut stream) = cortex.stream_generate(&janitor_prompt, None, None).await {
                 let mut extraction = String::new();
                 while let Some(chunk) = stream.next().await {
                     if let Ok(token) = chunk { extraction.push_str(&token); }
@@ -1393,7 +1804,7 @@ async fn main() -> Result<()> {
         if cortex.config.autonomous_mode {
             let history = format!("User: {}\nRalph: {}", input, response);
             let reflexion_prompt = format!("{}\n\nCONVERSATION:\n{}", reflexion::Reflexion::critique_prompt(), history);
-            if let Ok(mut stream) = cortex.stream_generate(&reflexion_prompt).await {
+            if let Ok(mut stream) = cortex.stream_generate(&reflexion_prompt, None, None).await {
                 let mut extraction = String::new();
                 while let Some(chunk) = stream.next().await {
                     if let Ok(token) = chunk { extraction.push_str(&token); }

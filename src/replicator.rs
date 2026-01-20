@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use serde::{Deserialize, Serialize};
 
+const RALPH_DIR: &str = ".ralph";
+
 /// Configuration for a new Ralph instance
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplicaConfig {
@@ -147,7 +149,7 @@ inherit_global = {}
         let target = workspace.join(".ralph/memory");
         
         if self.global_memory_path.exists() {
-            // Copy LanceDB files
+            // Copy CozoDB files
             fs_extra::dir::copy(
                 &self.global_memory_path,
                 &target,
@@ -268,6 +270,66 @@ inherit_global = {}
         };
 
         self.replicate(config)
+    }
+
+    // --- PHASE 6: ROLLBACK SNAPSHOTS ---
+
+    /// Create a rollback snapshot of the current workspace state
+    pub fn create_snapshot(&self, label: &str) -> Result<String> {
+        let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
+        let snapshot_id = format!("{}_{}", timestamp, label.replace(' ', "_"));
+        let snapshot_dir = Path::new(RALPH_DIR).join("snapshots").join(&snapshot_id);
+        
+        std::fs::create_dir_all(&snapshot_dir)?;
+        
+        // 1. Copy Critical Files
+        let critical_files = vec!["Cargo.toml", "package.json", "TASKS.md", "README.md", "PRD.md"];
+        for file in critical_files {
+            if Path::new(file).exists() {
+                std::fs::copy(file, snapshot_dir.join(file))?;
+            }
+        }
+        
+        // 2. Snapshot Source Code (src/)
+        if Path::new("src").exists() {
+            let options = fs_extra::dir::CopyOptions::new().overwrite(true).content_only(false);
+            fs_extra::dir::copy("src", &snapshot_dir, &options)?;
+        }
+        
+        println!("📸 Snapshot created: {}", snapshot_id);
+        Ok(snapshot_id)
+    }
+
+    /// Restore the workspace from a snapshot
+    pub fn restore_snapshot(&self, snapshot_id: &str) -> Result<()> {
+        let snapshot_dir = Path::new(RALPH_DIR).join("snapshots").join(snapshot_id);
+        if !snapshot_dir.exists() {
+            return Err(anyhow::anyhow!("Snapshot not found: {}", snapshot_id));
+        }
+
+        println!("⏪ Restoring snapshot: {}...", snapshot_id);
+        
+        // 1. Restore Files
+        let options = fs_extra::dir::CopyOptions::new().overwrite(true).content_only(true);
+        for entry in std::fs::read_dir(&snapshot_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_name = path.file_name().unwrap();
+            
+            if path.is_dir() {
+                // recursively copy directories (like src/)
+                if file_name == "src" {
+                    // Remove current src to ensure clean state
+                     if Path::new("src").exists() { std::fs::remove_dir_all("src")?; }
+                     fs_extra::dir::copy(&path, ".", &fs_extra::dir::CopyOptions::new().overwrite(true))?;
+                }
+            } else {
+                std::fs::copy(&path, Path::new(".").join(file_name))?;
+            }
+        }
+        
+        println!("✅ Restoration complete.");
+        Ok(())
     }
 }
 
