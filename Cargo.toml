@@ -21,11 +21,11 @@ toml = "0.8"
 # Database & Vectors
 lancedb = "0.18" # Keeping 0.18 as used previously, assuming compatibility
 # fastembed = "4" # Removed in favor of Candle for Metal support
-candle-core = { version = "0.8.2", features = ["metal"] }
+candle-core = { version = "0.8.2" }
 candle-nn = "0.8.2"
 candle-transformers = "0.8.2"
 tokenizers = { version = "0.19", features = ["onig"] }
-hf-hub = "0.3"
+hf-hub = "0.4"
 arrow-array = "54"
 arrow-schema = "54"
 

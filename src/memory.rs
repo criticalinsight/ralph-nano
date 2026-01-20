@@ -38,7 +38,7 @@ impl Memory {
         let db = lancedb::connect(uri).execute().await?;
 
         // Initialize Candle / Metal
-        let device = Device::new_metal(0).unwrap_or(Device::Cpu);
+        let device = Device::Cpu;
         println!("🧠 Memory Module using device: {:?}", device);
 
         // Load model from HF Hub (BGE-Small-en-v1.5)
@@ -340,4 +340,31 @@ pub fn normalize_l2(v: &Tensor) -> Result<Tensor> {
     let sum_sq = v.sqr()?.sum_keepdim(1)?;
     let norm = sum_sq.sqrt()?;
     Ok(v.broadcast_div(&norm)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_semantic_cache() -> Result<()> {
+        let temp_dir = std::env::temp_dir().join("ralph_test_memory");
+        if temp_dir.exists() {
+            std::fs::remove_dir_all(&temp_dir)?;
+        }
+        let memory = Memory::new(temp_dir.to_str().unwrap()).await?;
+
+        // Test Cache Miss
+        let result = memory.check_cache("What is the capital of France?").await?;
+        assert!(result.is_none());
+
+        // Test Store
+        memory.store_cache("What is the capital of France?", "Paris").await?;
+
+        // Test Cache Hit (Exact)
+        let result = memory.check_cache("What is the capital of France?").await?;
+        assert_eq!(result, Some("Paris".to_string()));
+
+        Ok(())
+    }
 }
