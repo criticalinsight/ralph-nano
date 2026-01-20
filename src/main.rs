@@ -1016,6 +1016,15 @@ async fn main() -> Result<()> {
     let mut mcp_manager = McpManager::new();
     let memory = Arc::new(Memory::new(&format!("{}/lancedb", RALPH_DIR)).await?);
 
+    // Initialize Swarm Manager for parallel task execution
+    let mut swarm_manager = swarm::SwarmManager::new(Path::new("."));
+    if cortex.config.autonomous_mode {
+        println!("{}", "🐝 Spawning worker swarm...".cyan());
+        if let Err(e) = swarm_manager.spawn_workers(3) {
+            eprintln!("Failed to spawn workers: {}", e);
+        }
+    }
+
     // Populate Knowledge Graph from workspace
     let memory_sync = Arc::clone(&memory);
     tokio::spawn(async move {
@@ -1210,29 +1219,41 @@ async fn main() -> Result<()> {
         let prompt_raw = format!("{}{}", base_prompt, instructions);
         let prompt = cortex.compress_prompt(&prompt_raw).await.unwrap_or(prompt_raw);
 
-        println!("{}", "thinking...".dimmed());
-        let mut stream = cortex.stream_generate(&prompt).await?;
-        let mut response = String::new();
+        // Check semantic cache first
+        let cached_response = memory.check_cache(&prompt).await.ok().flatten();
+        let (response, from_cache) = if let Some(cached) = cached_response {
+            println!("{}", "⚡ Cache Hit! Using stored response...".green());
+            (cached, true)
+        } else {
+            println!("{}", "thinking...".dimmed());
+            let mut stream = cortex.stream_generate(&prompt).await?;
+            let mut resp = String::new();
+            while let Some(chunk) = stream.next().await {
+                let token = chunk?;
+                print!("{}", token);
+                io::stdout().flush()?;
+                resp.push_str(&token);
+            }
+            // Store in cache for future use
+            let _ = memory.store_cache(&prompt, &resp).await;
+            (resp, false)
+        };
+
         let mut parser = IncrementalParser::new();
         let shadow = ShadowWorkspace::new();
 
-        while let Some(chunk) = stream.next().await {
-            let token = chunk?;
-            print!("{}", token);
-            io::stdout().flush()?;
-            response.push_str(&token);
-
-            let actions = parser.push(&token);
-            for action in actions {
-                match action {
-                    Action::WriteFile(path, content) => {
-                        if cortex.config.role == RalphRole::Executor {
-                             println!("\n🛠️ Staging {}...", path.yellow());
-                             if let Err(e) = shadow.stage_edit(&path, &content) { println!("Failed to stage: {}", e); continue; }
-                             context_manager.mark_hot(&path);
-                             let _ = hot_check.trigger();
-                        }
-                    },
+        // Parse all actions from response (works for both cached and fresh)
+        let actions = parser.push(&response);
+        for action in actions {
+            match action {
+                Action::WriteFile(path, content) => {
+                    if cortex.config.role == RalphRole::Executor {
+                         println!("\n🛠️ Staging {}...", path.yellow());
+                         if let Err(e) = shadow.stage_edit(&path, &content) { println!("Failed to stage: {}", e); continue; }
+                         context_manager.mark_hot(&path);
+                         let _ = hot_check.trigger();
+                    }
+                },
                     Action::ExecShell(cmd) => {
                         println!("\n🐚 Ready to exec: {}", cmd.cyan());
                     },
@@ -1281,8 +1302,9 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-        }
+
         println!("\n{}", "------------------------------------------------".dimmed());
+
 
         // Final Action Pass (for any blocks that were completed at the very end)
         let final_actions = extract_code_blocks(&response);
