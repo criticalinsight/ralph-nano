@@ -41,8 +41,8 @@ impl Memory {
         let device = Device::new_metal(0).unwrap_or(Device::Cpu);
         println!("🧠 Memory Module using device: {:?}", device);
 
-        // Load model from HF Hub
-        let model_id = "sentence-transformers/all-MiniLM-L6-v2".to_string();
+        // Load model from HF Hub (BGE-Small-en-v1.5)
+        let model_id = "BAAI/bge-small-en-v1.5".to_string();
         let api = Api::new()?;
         let repo = api.repo(Repo::new(model_id, RepoType::Model));
 
@@ -102,13 +102,12 @@ impl Memory {
             .collect::<Result<Vec<_>>>()?;
 
         let token_ids = Tensor::stack(&token_ids, 0)?;
-        let token_type_ids = token_ids.zeros_like()?; // BERT expects token type IDs
+        let token_type_ids = token_ids.zeros_like()?;
         
+        // BGE uses CLS pooling (take the first token, index 0)
         let embeddings = self.model.forward(&token_ids, &token_type_ids, None)?;
+        let embeddings = embeddings.get_on_dim(1, 0)?; // Get index 0 from dim 1 (sequence length)
         
-        // Mean pooling: take the mean of the last hidden state
-        let (_n_sentence, n_tokens, _hidden_size) = embeddings.dims3()?;
-        let embeddings = (embeddings.sum(1)? / (n_tokens as f64))?;
         let embeddings = normalize_l2(&embeddings)?;
 
         let embeddings_vec: Vec<Vec<f32>> = embeddings.to_vec2()?;
