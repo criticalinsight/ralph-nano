@@ -6,7 +6,7 @@
 *   **Embedded Memory**: CozoDB (RocksDB) integration with `candle`.
 *   **Direct API**: Clean connection to Gemini 1.5 Pro.
 
-## 🚩 v0.2.6: The Supervisor Release (✅ Completed)
+## 🚩 v0.2.4: The Supervisor Release (✅ Completed)
 *   **Bimodal Roles**: Switch between Supervisor (Architect) and Executor (Builder).
 *   **Symbol Cannon**: Signature-level codebase awareness for token efficiency.
 *   **Structured Directives**: JSON-based coordination protocol.
@@ -44,4 +44,4 @@
 *   **Multimodal Vision**: Screenshot capture passed to LLM for visual UI verification.
 
 ---
-*Last Updated: January 2026*
+*Last Updated: January 20, 2026*

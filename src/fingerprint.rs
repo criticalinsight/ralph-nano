@@ -1,8 +1,8 @@
 // src/fingerprint.rs - Project Fingerprinting and Dependency Awareness for Ralph-Nano v1.2.0
 
-use std::path::Path;
-use std::fs;
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectFingerprint {
@@ -78,7 +78,10 @@ impl ProjectFingerprint {
     }
 
     fn detect_rust_type(cargo_content: &str) -> ProjectType {
-        if cargo_content.contains("actix") || cargo_content.contains("axum") || cargo_content.contains("warp") {
+        if cargo_content.contains("actix")
+            || cargo_content.contains("axum")
+            || cargo_content.contains("warp")
+        {
             ProjectType::RustWeb
         } else if cargo_content.contains("[lib]") {
             ProjectType::RustLib
@@ -97,7 +100,11 @@ impl ProjectFingerprint {
                 return ProjectType::React;
             }
         }
-        if pkg.get("devDependencies").and_then(|d| d.get("typescript")).is_some() {
+        if pkg
+            .get("devDependencies")
+            .and_then(|d| d.get("typescript"))
+            .is_some()
+        {
             return ProjectType::TypeScript;
         }
         ProjectType::NodeJs
@@ -128,7 +135,10 @@ impl ProjectFingerprint {
                 if parts.len() == 2 {
                     let name = parts[0].trim().to_string();
                     let version = parts[1].trim().trim_matches('"').to_string();
-                    deps.push(Dependency { name, version: Some(version) });
+                    deps.push(Dependency {
+                        name,
+                        version: Some(version),
+                    });
                 }
             }
         }
@@ -151,13 +161,16 @@ impl ProjectFingerprint {
     }
 
     fn parse_requirements(content: &str) -> Vec<Dependency> {
-        content.lines()
+        content
+            .lines()
             .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
             .map(|l| {
-                let parts: Vec<&str> = l.splitn(2, |c| c == '=' || c == '>' || c == '<').collect();
+                let parts: Vec<&str> = l.splitn(2, ['=', '>', '<']).collect();
                 Dependency {
                     name: parts[0].trim().to_string(),
-                    version: parts.get(1).map(|s| s.trim_matches(|c| c == '=' || c == ' ').to_string()),
+                    version: parts
+                        .get(1)
+                        .map(|s| s.trim_matches(|c| c == '=' || c == ' ').to_string()),
                 }
             })
             .collect()
@@ -183,7 +196,9 @@ impl ProjectFingerprint {
             return String::new();
         }
 
-        let top_deps: Vec<String> = self.dependencies.iter()
+        let top_deps: Vec<String> = self
+            .dependencies
+            .iter()
             .take(10)
             .map(|d| d.name.clone())
             .collect();

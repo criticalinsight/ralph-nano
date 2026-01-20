@@ -1,6 +1,3 @@
-use anyhow::Result;
-use serde_json::json;
-
 pub struct Janitor;
 
 impl Janitor {
@@ -18,7 +15,8 @@ Rules:
     }
 
     pub fn parse_triples(content: &str) -> Vec<String> {
-        content.lines()
+        content
+            .lines()
             .map(|l| l.trim())
             .filter(|l| l.starts_with("- (") && l.contains(" --["))
             .map(|l| l.strip_prefix("- ").unwrap_or(l).to_string())

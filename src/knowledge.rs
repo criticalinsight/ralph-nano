@@ -1,13 +1,14 @@
-use anyhow::{Context, Result, anyhow};
+use crate::memory::Memory;
+// use cozo::DataValue;
+use anyhow::{anyhow, Result};
+use scraper::{Html, Selector};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use serde::{Deserialize, Serialize};
-use crate::memory::Memory;
-use scraper::{Html, Selector};
 use url::Url;
 
 use futures::StreamExt;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum LibraryType {
@@ -42,30 +43,40 @@ impl KnowledgeEngine {
 
     pub async fn detect_libraries(&self, _path: &Path) -> Result<Vec<DetectedLibrary>> {
         let mut all_libs = Vec::new();
-        if let Ok(rust_libs) = self.scan_rust_dependencies() { all_libs.extend(rust_libs); }
-        if let Ok(node_libs) = self.scan_node_dependencies() { all_libs.extend(node_libs); }
-        if let Ok(py_libs) = self.scan_python_dependencies() { all_libs.extend(py_libs); }
+        if let Ok(rust_libs) = self.scan_rust_dependencies() {
+            all_libs.extend(rust_libs);
+        }
+        if let Ok(node_libs) = self.scan_node_dependencies() {
+            all_libs.extend(node_libs);
+        }
+        if let Ok(py_libs) = self.scan_python_dependencies() {
+            all_libs.extend(py_libs);
+        }
         Ok(all_libs)
     }
 
     pub fn scan_all_dependencies(&self) -> Result<Vec<DetectedLibrary>> {
+        println!("DEBUG: Inside scan_all_dependencies");
         let mut libs = Vec::new();
-        
+
         // Rust
         if let Ok(rust_libs) = self.scan_rust_dependencies() {
+            println!("DEBUG: Scanned Rust - {} libs", rust_libs.len());
             libs.extend(rust_libs);
         }
-        
+
         // Node
         if let Ok(node_libs) = self.scan_node_dependencies() {
+            println!("DEBUG: Scanned Node - {} libs", node_libs.len());
             libs.extend(node_libs);
         }
-        
+
         // Python
         if let Ok(py_libs) = self.scan_python_dependencies() {
+            println!("DEBUG: Scanned Python - {} libs", py_libs.len());
             libs.extend(py_libs);
         }
-        
+
         libs.sort_by(|a, b| a.name.cmp(&b.name));
         libs.dedup_by(|a, b| a.name == b.name && a.lib_type == b.lib_type);
         Ok(libs)
@@ -73,7 +84,9 @@ impl KnowledgeEngine {
 
     pub fn scan_rust_dependencies(&self) -> Result<Vec<DetectedLibrary>> {
         let path = Path::new("Cargo.toml");
-        if !path.exists() { return Ok(vec![]); }
+        if !path.exists() {
+            return Ok(vec![]);
+        }
         let content = fs::read_to_string(path)?;
         let value: toml::Value = toml::from_str(&content)?;
         let mut libs = Vec::new();
@@ -82,7 +95,11 @@ impl KnowledgeEngine {
             for (name, val) in table {
                 let version = match val {
                     toml::Value::String(s) => s.clone(),
-                    toml::Value::Table(t) => t.get("version").and_then(|v| v.as_str()).unwrap_or("latest").to_string(),
+                    toml::Value::Table(t) => t
+                        .get("version")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("latest")
+                        .to_string(),
                     _ => "latest".to_string(),
                 };
                 libs.push(DetectedLibrary {
@@ -106,7 +123,9 @@ impl KnowledgeEngine {
 
     pub fn scan_node_dependencies(&self) -> Result<Vec<DetectedLibrary>> {
         let path = Path::new("package.json");
-        if !path.exists() { return Ok(vec![]); }
+        if !path.exists() {
+            return Ok(vec![]);
+        }
         let content = fs::read_to_string(path)?;
         let v: serde_json::Value = serde_json::from_str(&content)?;
         let mut libs = Vec::new();
@@ -131,12 +150,18 @@ impl KnowledgeEngine {
             if let Ok(content) = fs::read_to_string(req_path) {
                 for line in content.lines() {
                     let line = line.trim();
-                    if line.is_empty() || line.starts_with('#') { continue; }
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
                     let parts: Vec<&str> = line.split(&['=', '>', '<', '~'][..]).collect();
                     if !parts[0].trim().is_empty() {
                         libs.push(DetectedLibrary {
                             name: parts[0].trim().to_string(),
-                            version: if parts.len() > 1 { parts[1].trim().to_string() } else { "latest".to_string() },
+                            version: if parts.len() > 1 {
+                                parts[1].trim().to_string()
+                            } else {
+                                "latest".to_string()
+                            },
                             lib_type: LibraryType::Python,
                         });
                     }
@@ -146,37 +171,42 @@ impl KnowledgeEngine {
         // pyproject.toml
         let py_toml = Path::new("pyproject.toml");
         if py_toml.exists() {
-             if let Ok(content) = fs::read_to_string(py_toml) {
-                 if let Ok(value) = toml::from_str::<toml::Value>(&content) {
-                     if let Some(deps) = value.get("project").and_then(|p| p.get("dependencies")).and_then(|d| d.as_array()) {
-                         for d in deps {
-                             if let Some(s) = d.as_str() {
-                                 let parts: Vec<&str> = s.split(&['=', '>', '<', '~', ' '][..]).collect();
-                                 libs.push(DetectedLibrary {
-                                     name: parts[0].trim().to_string(),
-                                     version: "latest".to_string(),
-                                     lib_type: LibraryType::Python,
-                                 });
-                             }
-                         }
-                     }
-                 }
-             }
+            if let Ok(content) = fs::read_to_string(py_toml) {
+                if let Ok(value) = toml::from_str::<toml::Value>(&content) {
+                    if let Some(deps) = value
+                        .get("project")
+                        .and_then(|p| p.get("dependencies"))
+                        .and_then(|d| d.as_array())
+                    {
+                        for d in deps {
+                            if let Some(s) = d.as_str() {
+                                let parts: Vec<&str> =
+                                    s.split(&['=', '>', '<', '~', ' '][..]).collect();
+                                libs.push(DetectedLibrary {
+                                    name: parts[0].trim().to_string(),
+                                    version: "latest".to_string(),
+                                    lib_type: LibraryType::Python,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
         }
         Ok(libs)
     }
 
     pub async fn ingest_workspace(&self, path: &Path) -> Result<()> {
         println!("🧠 Mapping workspace: {:?}", path);
-        
+
         // 1. Scan for Rust documentation
         if let Err(e) = self.ingest_rust_docs_from_path(path).await {
             eprintln!("Rust doc ingestion warning: {}", e);
         }
-        
+
         // 2. Scan for top-level READMEs and architectural docs
         // (Future: Add Node.js and Python specific scans here)
-        
+
         Ok(())
     }
 
@@ -202,14 +232,20 @@ impl KnowledgeEngine {
     }
 
     async fn ingest_rust_docs(&self, crate_name: &str, version: &str) -> Result<()> {
-        let base_url = format!("https://docs.rs/{}/latest/{}/", crate_name, crate_name.replace('-', "_"));
+        let base_url = format!(
+            "https://docs.rs/{}/latest/{}/",
+            crate_name,
+            crate_name.replace('-', "_")
+        );
         println!("📚 Auto-learning (Concurrent): {}...", crate_name);
-        
+
         // 1. Fetch main page carefully
         let res = self.client.get(&base_url).send().await?;
-        if !res.status().is_success() { return Ok(()); }
+        if !res.status().is_success() {
+            return Ok(());
+        }
         let html = res.text().await?;
-        
+
         // 2. Discover modules (Drop doc before await)
         let mut urls_to_process = {
             let doc = Html::parse_document(&html);
@@ -225,7 +261,7 @@ impl KnowledgeEngine {
             }
             urls
         };
-        
+
         // 3. Concurrent ingestion (limit to 5 URLs total for Nano scale)
         urls_to_process.truncate(5); // Limit to 5 URLs total for Nano scale
         let stream = futures::stream::iter(urls_to_process)
@@ -245,11 +281,11 @@ impl KnowledgeEngine {
             })
             .buffer_unordered(3);
 
-        let mut results = stream.collect::<Vec<_>>().await;
-        
+        let results = stream.collect::<Vec<_>>().await;
+
         for res in results.into_iter().flatten() {
             let (url, html) = res;
-            
+
             // Phase 5: Differential Sync - compute hash of fetched content
             let mut hasher = Sha256::new();
             hasher.update(html.as_bytes());
@@ -262,11 +298,22 @@ impl KnowledgeEngine {
                 }
             }
 
-            if let Ok(_) = self.process_and_store_html(&url, &html, crate_name, version, LibraryType::Rust, &url == &base_url).await {
+            if self
+                .process_and_store_html(
+                    &url,
+                    &html,
+                    crate_name,
+                    version,
+                    LibraryType::Rust,
+                    url == base_url,
+                )
+                .await
+                .is_ok()
+            {
                 let _ = self.memory.update_sync_status(&url, &current_hash).await;
             }
         }
-        
+
         Ok(())
     }
 
@@ -276,16 +323,19 @@ impl KnowledgeEngine {
         let res = self.client.get(&url).send().await?;
         if res.status().is_success() {
             let html = res.text().await?;
-            
+
             let mut hasher = Sha256::new();
             hasher.update(html.as_bytes());
             let current_hash = hex::encode(hasher.finalize());
 
             if let Ok(Some((_, old_hash))) = self.memory.check_sync_status(&url).await {
-                if old_hash == current_hash { return Ok(()); }
+                if old_hash == current_hash {
+                    return Ok(());
+                }
             }
 
-            self.process_and_store_html(&url, &html, name, version, LibraryType::Node, true).await?;
+            self.process_and_store_html(&url, &html, name, version, LibraryType::Node, true)
+                .await?;
             let _ = self.memory.update_sync_status(&url, &current_hash).await;
         }
         Ok(())
@@ -297,22 +347,33 @@ impl KnowledgeEngine {
         let res = self.client.get(&url).send().await?;
         if res.status().is_success() {
             let html = res.text().await?;
-            
+
             let mut hasher = Sha256::new();
             hasher.update(html.as_bytes());
             let current_hash = hex::encode(hasher.finalize());
 
             if let Ok(Some((_, old_hash))) = self.memory.check_sync_status(&url).await {
-                if old_hash == current_hash { return Ok(()); }
+                if old_hash == current_hash {
+                    return Ok(());
+                }
             }
 
-            self.process_and_store_html(&url, &html, name, version, LibraryType::Python, true).await?;
+            self.process_and_store_html(&url, &html, name, version, LibraryType::Python, true)
+                .await?;
             let _ = self.memory.update_sync_status(&url, &current_hash).await;
         }
         Ok(())
     }
 
-    async fn process_and_store_html(&self, url: &str, html: &str, name: &str, version: &str, lib_type: LibraryType, is_main: bool) -> Result<()> {
+    async fn process_and_store_html(
+        &self,
+        url: &str,
+        html: &str,
+        name: &str,
+        version: &str,
+        lib_type: LibraryType,
+        is_main: bool,
+    ) -> Result<()> {
         let mut full_text = String::new();
         {
             let doc = Html::parse_document(html);
@@ -322,13 +383,13 @@ impl KnowledgeEngine {
                 LibraryType::Python => "#description, .project-description",
             };
             let selector = Selector::parse(selector_str).unwrap();
-            
+
             for element in doc.select(&selector) {
                 let text = html2text::from_read(element.html().as_bytes(), 80);
                 full_text.push_str(&text);
                 full_text.push_str("\n\n");
             }
-            
+
             if full_text.is_empty() {
                 full_text = html2text::from_read(html.as_bytes(), 80);
             }
@@ -345,34 +406,46 @@ impl KnowledgeEngine {
 
         // Semantic Chunking
         let chunks = self.semantic_chunk(&full_text, 1200);
-        
+
         // Batch Embed
         let embeddings = self.memory.batch_embed(&chunks)?;
-        
+
         let mut entries = Vec::new();
         for (i, (chunk, embedding)) in chunks.into_iter().zip(embeddings.into_iter()).enumerate() {
-            let chunk_type = if chunk.contains("fn ") || chunk.contains("class ") || chunk.contains("def ") || chunk.contains("struct ") {
+            let chunk_type = if chunk.contains("fn ")
+                || chunk.contains("class ")
+                || chunk.contains("def ")
+                || chunk.contains("struct ")
+            {
                 "definition"
             } else if is_main && i == 0 {
                 "overview"
             } else {
                 "general"
             };
-            
-            let id = format!("doc:{}:{}:{}", name, url.as_bytes().len(), i);
-            entries.push((id, name.to_string(), version.to_string(), chunk, lang_str.to_string(), chunk_type.to_string(), embedding));
+
+            let id = format!("doc:{}:{}:{}", name, url.len(), i);
+            entries.push((
+                id,
+                name.to_string(),
+                version.to_string(),
+                chunk,
+                lang_str.to_string(),
+                chunk_type.to_string(),
+                embedding,
+            ));
         }
-        
+
         // Bulk Insert
         self.memory.batch_add_library_entries(entries).await?;
-        
+
         Ok(())
     }
 
     fn semantic_chunk(&self, text: &str, target_size: usize) -> Vec<String> {
         let mut chunks = Vec::new();
         let mut current = String::new();
-        
+
         for block in text.split("\n\n") {
             if current.len() + block.len() > target_size && !current.is_empty() {
                 chunks.push(current);
@@ -381,8 +454,10 @@ impl KnowledgeEngine {
             current.push_str(block);
             current.push_str("\n\n");
         }
-        
-        if !current.is_empty() { chunks.push(current); }
+
+        if !current.is_empty() {
+            chunks.push(current);
+        }
         chunks
     }
 
@@ -392,7 +467,10 @@ impl KnowledgeEngine {
 
         for lib_name in known_libs {
             // Hardcoded check for docs.rs (Rust) for now as MVP
-            if let Ok(latest) = self.check_upstream_version(&lib_name, LibraryType::Rust).await {
+            if let Ok(latest) = self
+                .check_upstream_version(&lib_name, LibraryType::Rust)
+                .await
+            {
                 // In a real scenario, we'd store the local version and compare.
                 updates.push((lib_name, "locally_cached".to_string(), latest));
             }
@@ -405,10 +483,15 @@ impl KnowledgeEngine {
         for line in text.lines() {
             let trimmed = line.trim();
             // Skip common boilerplate or heavy comment blocks
-            if trimmed.is_empty() { continue; }
-            if trimmed.starts_with("//!") || trimmed.starts_with("///") || trimmed.starts_with("//") {
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.starts_with("//!") || trimmed.starts_with("///") || trimmed.starts_with("//")
+            {
                 // Keep brief comments but skip massive doc-comment blocks for efficiency
-                if trimmed.len() > 200 { continue; }
+                if trimmed.len() > 200 {
+                    continue;
+                }
             }
             if trimmed.contains("Copyright (c)") || trimmed.contains("Licensed under") {
                 continue;
@@ -422,9 +505,12 @@ impl KnowledgeEngine {
         match lib_type {
             LibraryType::Rust => {
                 let url = format!("https://crates.io/api/v1/crates/{}", name);
-                let res = self.client.get(&url)
+                let res = self
+                    .client
+                    .get(&url)
                     .header("User-Agent", "Ralph-Nano-Monitor/0.3.5")
-                    .send().await?;
+                    .send()
+                    .await?;
                 if res.status().is_success() {
                     let val: serde_json::Value = res.json().await?;
                     if let Some(v) = val["crate"]["max_version"].as_str() {

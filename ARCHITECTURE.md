@@ -58,6 +58,7 @@ graph TD
   - Copies `src/`, `Cargo.toml`, and `Cargo.lock` to a isolated environment.
   - Applies proposed LLM edits to the shadow files first.
   - Runs `cargo check` to verify that proposed changes don't break the build.
+  - **Path Sanitization**: Helper `is_safe_path` ensures all file operations remain within the workspace, preventing path traversal attacks.
   - **Universal Mode**: Detection logic skips `cargo check` if it's not a Rust project, allowing the sandbox to be used for general file verification.
 
 ### 3. `VectorStore` (The Hippocampus)
@@ -94,11 +95,11 @@ graph TD
   - **Pruning**: Deletes irrelevant memories.
   - **Consolidation**: Summarizes long histories into "Lessons".
 
-### 6. `Main Loop` (v0.2.6)
+### 6. `Main Loop` (v0.2.4)
 - **Role**: Coordination and Oversight.
 - **Implementation**: Infinite loop with Dual Role support and Pro-only inference.
 - **Supervisor Features**:
-    - **Symbol Cannon**: Replaces full workspace scan with a high-level symbol hierarchy (signatures).
+    - **Symbol Cannon**: Replaces full workspace scan with a high-level symbol hierarchy (signatures). Enhanced with robust error handling, silent fallbacks for parse failures, and cached mtime verification.
     - **Structured Directives**: Enforces JSON communication (`{ "directives": [...] }`).
     - **Task Compression**: prunes `TASKS.md` to keep context focused.
 

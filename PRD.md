@@ -50,9 +50,10 @@ To build the "vim of agents"—lightweight, incredibly fast, and powerful. It sh
   1. **Shadow Workspace**: Edits are first applied to a `.ralph/shadow` directory.
   2. **Cargo Check**: In Rust projects, `cargo check` is run against the shadow workspace to verify compilation.
   3. **Universal Mode**: In non-Rust projects, compilation checks are gracefully skipped while maintaining the path-based sandboxing.
+  3. **Path Sanitization**: Helper `is_safe_path` ensures all file operations remain within the workspace.
   4. **Interactive Diff**: Users see colored diffs before changes are committed to the real workspace.
 
-### 5.3 Persistent Autonomy & Supervision (v0.2.6)
+### 5.3 Persistent Autonomy & Supervision (v0.2.4)
 - **Goal**: Maintain continuous oversight and guide external executors with maximum token efficiency.
 - **Mechanism**:
   - **Single Pro Model**: Uses `gemini-3-pro-preview` exclusively for all reasoning.

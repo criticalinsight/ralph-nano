@@ -1,58 +1,70 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use colored::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-mod mcp_client;
-mod memory;
-mod janitor;
-mod swarm;
-mod reflexion;
+mod api_server;
+mod benchmarker;
+mod daemon;
 mod fingerprint;
 mod git_context;
-mod daemon;
-mod api_server;
-mod qa;
-mod benchmarker;
-mod replicator;
+mod janitor;
 mod knowledge;
+mod mcp_client;
+mod memory;
+mod qa;
+mod reflexion;
+mod replicator;
+mod swarm;
 mod wasm_runtime;
 // Phase 6: Debate
 mod debate;
 mod lint;
 
-use mcp_client::McpManager;
-use memory::{Memory, GraphNode};
-use knowledge::KnowledgeEngine;
+use debate::{Debate, DebateSynthesis};
+use fs_extra::dir::CopyOptions;
+use futures::StreamExt;
 use janitor::Janitor;
-use debate::{Debate, DebateRound, DebateSynthesis};
-use lint::{SemanticLinter, LintViolation};
+use knowledge::KnowledgeEngine;
+use lint::{LintViolation, SemanticLinter};
+use mcp_client::McpManager;
+use memory::{GraphNode, Memory};
+use quote::ToTokens;
+use rayon::prelude::*;
 use serde_json::Value;
-use std::sync::Arc;
+use sha2::{Digest, Sha256};
+use similar::{ChangeTag, TextDiff};
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::collections::HashMap;
+use std::sync::Arc;
+use syn::{
+    visit::{self, Visit},
+    ItemEnum, ItemFn, ItemImpl, ItemStruct,
+};
 use tokio::time::{sleep, Duration};
-use rayon::prelude::*;
-use futures::StreamExt;
-use syn::{visit::{self, Visit}, ItemFn, ItemStruct, ItemEnum, ItemImpl};
-use quote::ToTokens;
 use walkdir::WalkDir;
-use fs_extra::dir::CopyOptions;
-use similar::{ChangeTag, TextDiff};
-use sha2::{Sha256, Digest};
 
 // --- CONSTANTS ---
 const PRIMARY_MODEL: &str = "gemini-3-pro-preview";
 const FALLBACK_MODEL: &str = "gemini-3-pro-preview";
 const COMPRESSION_MODEL: &str = "gemini-3.0-flash";
+#[allow(dead_code)]
 const COMPRESSION_FALLBACK: &str = "gemini-2.5-flash";
 const RALPH_DIR: &str = ".ralph";
 const INCLUDE_EXTENSIONS: &[&str] = &["rs", "py", "js", "ts", "html", "css", "toml", "md"];
-const SKIP_DIRS: &[&str] = &["target", ".git", ".ralph", "node_modules", "lancedb", "shadow"];
+const SKIP_DIRS: &[&str] = &[
+    "target",
+    ".git",
+    ".ralph",
+    "node_modules",
+    "lancedb",
+    "shadow",
+];
+#[allow(dead_code)]
 const COMPRESSION_THRESHOLD: usize = 10000; // Compress prompts > 10k chars
 
 // --- CORE TYPES ---
@@ -83,11 +95,14 @@ struct ContextManager {
 
 impl ContextManager {
     fn new() -> Self {
-        Self { hot_files: HashMap::new() }
+        Self {
+            hot_files: HashMap::new(),
+        }
     }
 
     fn mark_hot(&mut self, path: &str) {
-        self.hot_files.insert(path.to_string(), std::time::SystemTime::now());
+        self.hot_files
+            .insert(path.to_string(), std::time::SystemTime::now());
     }
 
     fn is_hot(&self, path: &str) -> bool {
@@ -100,8 +115,12 @@ impl ContextManager {
     }
 }
 
-fn default_max_loops() -> usize { 50 }
-fn default_role() -> RalphRole { RalphRole::Executor }
+fn default_max_loops() -> usize {
+    50
+}
+fn default_role() -> RalphRole {
+    RalphRole::Executor
+}
 
 impl Default for RalphConfig {
     fn default() -> Self {
@@ -120,7 +139,10 @@ impl Default for RalphConfig {
 struct Telemetry;
 impl Telemetry {
     fn notify(title: &str, message: &str) {
-        let script = format!("display notification \"{}\" with title \"{}\" sound name \"Hero\"", message, title);
+        let script = format!(
+            "display notification \"{}\" with title \"{}\" sound name \"Hero\"",
+            message, title
+        );
         let _ = Command::new("osascript").arg("-e").arg(script).spawn();
     }
 
@@ -142,7 +164,7 @@ impl Cortex {
     fn new(config: RalphConfig, memory: Arc<Memory>) -> Result<Self> {
         let api_key = env::var("GEMINI_API_KEY")
             .context("CRITICAL: GEMINI_API_KEY not found in .env or environment")?;
-        
+
         Ok(Self {
             api_key,
             client: reqwest::Client::new(),
@@ -165,7 +187,7 @@ impl Cortex {
             "https://generativelanguage.googleapis.com/v1beta/cachedContents?key={}",
             self.api_key
         );
-        
+
         // Context caching requires at least 32,768 tokens.
         // For Nano, we'll try it if the context is large enough.
         let payload = serde_json::json!({
@@ -177,12 +199,13 @@ impl Cortex {
         let res = self.client.post(&url).json(&payload).send().await?;
         let status = res.status();
         if !status.is_success() {
-             let err_text = res.text().await.unwrap_or_default();
-             return Err(anyhow!("Failed to create cache: {} - {}", status, err_text));
+            let err_text = res.text().await.unwrap_or_default();
+            return Err(anyhow!("Failed to create cache: {} - {}", status, err_text));
         }
 
         let val: Value = res.json().await?;
-        let cache_id = val["name"].as_str()
+        let cache_id = val["name"]
+            .as_str()
             .context("Cache ID not found in response")?
             .to_string();
 
@@ -190,14 +213,20 @@ impl Cortex {
         Ok(cache_id)
     }
 
-    async fn stream_api(&self, model: &str, prompt: &str, cache_id: Option<&str>, images: Option<Vec<String>>) -> Result<impl futures::Stream<Item = Result<String>>> {
+    async fn stream_api(
+        &self,
+        model: &str,
+        prompt: &str,
+        cache_id: Option<&str>,
+        images: Option<Vec<String>>,
+    ) -> Result<impl futures::Stream<Item = Result<String>>> {
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?key={}",
             model, self.api_key
         );
-        
+
         let mut parts = vec![serde_json::json!({ "text": prompt })];
-        
+
         if let Some(imgs) = images {
             for img_data in imgs {
                 parts.push(serde_json::json!({
@@ -214,35 +243,51 @@ impl Cortex {
         });
 
         if let Some(cid) = cache_id {
-            payload.as_object_mut().unwrap().insert("cachedContent".to_string(), Value::String(cid.to_string()));
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("cachedContent".to_string(), Value::String(cid.to_string()));
+            }
         }
 
         let res = self.client.post(&url).json(&payload).send().await?;
-        
-        if res.status() == 429 { return Err(anyhow::anyhow!("RATE_LIMIT")); }
+
+        if res.status() == 429 {
+            return Err(anyhow::anyhow!("RATE_LIMIT"));
+        }
         if !res.status().is_success() {
             return Err(anyhow::anyhow!("API Error: {}", res.status()));
         }
 
         let stream = res.bytes_stream().map(|item| {
-            item.map_err(anyhow::Error::from).and_then(|bytes| {
+            item.map_err(anyhow::Error::from).map(|bytes| {
                 let s = String::from_utf8_lossy(&bytes).to_string();
-                let sanitized = s.trim().trim_start_matches('[').trim_end_matches(']').trim_start_matches(',');
-                if sanitized.is_empty() { return Ok(String::new()); }
-                
+                let sanitized = s
+                    .trim()
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .trim_start_matches(',');
+                if sanitized.is_empty() {
+                    return String::new();
+                }
+
                 match serde_json::from_str::<serde_json::Value>(sanitized) {
                     Ok(val) => {
-                        let text = val["candidates"][0]["content"]["parts"][0]["text"].as_str().unwrap_or("").to_string();
-                        Ok(text)
-                    },
-                    Err(_) => Ok(String::new())
+                        let text = val["candidates"][0]["content"]["parts"][0]["text"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string();
+                        text
+                    }
+                    Err(_) => String::new(),
                 }
             })
         });
         Ok(stream)
     }
 
-    async fn stream_local_llm(&self, prompt: &str) -> Result<impl futures::Stream<Item = Result<String>> + Send + Unpin> {
+    async fn stream_local_llm(
+        &self,
+        prompt: &str,
+    ) -> Result<impl futures::Stream<Item = Result<String>> + Send + Unpin> {
         let url = "http://localhost:11434/api/generate";
         let payload = serde_json::json!({
             "model": "llama3.2",
@@ -250,42 +295,64 @@ impl Cortex {
             "stream": true
         });
         let res = self.client.post(url).json(&payload).send().await?;
-        
+
         let stream = res.bytes_stream().map(|item| {
-            item.map_err(anyhow::Error::from).and_then(|bytes| {
+            item.map_err(anyhow::Error::from).map(|bytes| {
                 let s = String::from_utf8_lossy(&bytes).to_string();
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(&s) {
                     let text = val["response"].as_str().unwrap_or("").to_string();
-                    Ok(text)
+                    text
                 } else {
-                    Ok(String::new())
+                    String::new()
                 }
             })
         });
         Ok(stream.boxed())
     }
 
-    async fn stream_generate(&self, prompt: &str, context: Option<&str>, images: Option<Vec<String>>) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
+    async fn stream_generate(
+        &self,
+        prompt: &str,
+        context: Option<&str>,
+        images: Option<Vec<String>>,
+    ) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
         use futures::StreamExt;
-        
-        let cache_id = if let Some(ctx) = context {
-            if ctx.len() > 10000 && images.is_none() { // Only cache text-only contexts for now
-                self.create_context_cache(ctx).await.ok()
-            } else { None }
-        } else { None };
 
-        match self.stream_api(&self.config.primary_model, prompt, cache_id.as_deref(), images.clone()).await {
+        let cache_id = if let Some(ctx) = context {
+            if ctx.len() > 10000 && images.is_none() {
+                // Only cache text-only contexts for now
+                self.create_context_cache(ctx).await.ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        match self
+            .stream_api(
+                &self.config.primary_model,
+                prompt,
+                cache_id.as_deref(),
+                images.clone(),
+            )
+            .await
+        {
             Ok(s) => Ok(s.boxed()),
-            Err(_) => match self.stream_api(&self.config.fallback_model, prompt, None, images).await {
+            Err(_) => match self
+                .stream_api(&self.config.fallback_model, prompt, None, images)
+                .await
+            {
                 Ok(s) => Ok(s.boxed()),
                 Err(_) => {
                     let s = self.stream_local_llm(prompt).await?;
                     Ok(s.boxed())
                 }
-            }
+            },
         }
     }
 
+    #[allow(dead_code)]
     async fn compress_prompt(&self, prompt: &str) -> Result<String> {
         if prompt.len() < COMPRESSION_THRESHOLD {
             return Ok(prompt.to_string());
@@ -300,26 +367,37 @@ impl Cortex {
         );
 
         // Try primary compression model, fallback if needed
-        let result = match self.generate_sync(COMPRESSION_MODEL, &compression_prompt).await {
+        let result = match self
+            .generate_sync(COMPRESSION_MODEL, &compression_prompt)
+            .await
+        {
             Ok(s) => s,
-            Err(_) => match self.generate_sync(COMPRESSION_FALLBACK, &compression_prompt).await {
+            Err(_) => match self
+                .generate_sync(COMPRESSION_FALLBACK, &compression_prompt)
+                .await
+            {
                 Ok(s) => s,
                 Err(_) => return Ok(prompt.to_string()), // Fallback to original
-            }
+            },
         };
 
         let original_len = prompt.len();
         let compressed_len = result.len();
-        println!("   Compressed: {} -> {} chars ({:.0}% reduction)", 
-            original_len, compressed_len, 
-            ((original_len - compressed_len) as f64 / original_len as f64) * 100.0);
+        println!(
+            "   Compressed: {} -> {} chars ({:.0}% reduction)",
+            original_len,
+            compressed_len,
+            ((original_len - compressed_len) as f64 / original_len as f64) * 100.0
+        );
 
         Ok(result)
     }
 
     async fn generate_sync(&self, model: &str, prompt: &str) -> Result<String> {
-        let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            model, self.api_key);
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+            model, self.api_key
+        );
 
         let payload = serde_json::json!({
             "contents": [{"parts": [{"text": prompt}]}]
@@ -327,18 +405,24 @@ impl Cortex {
 
         let res = self.client.post(&url).json(&payload).send().await?;
         let body: Value = res.json().await?;
-        body["candidates"][0]["content"]["parts"][0]["text"].as_str()
+        body["candidates"][0]["content"]["parts"][0]["text"]
+            .as_str()
             .map(|s| s.to_string())
             .context("No text in response")
     }
 
     /// Phase 6: Self-Correcting Debate
     async fn conduct_debate(&self, topic: &str, context: &str) -> Result<DebateSynthesis> {
-        println!("{}", format!("\n⚖️  CONDUCTING DEBATE: {}", topic).yellow().bold());
-        
+        println!(
+            "{}",
+            format!("\n⚖️  CONDUCTING DEBATE: {}", topic)
+                .yellow()
+                .bold()
+        );
+
         let debate = Debate::security_vs_performance();
         let prompts = debate.generate_prompts(context, topic);
-        
+
         // Run persona critiques in parallel
         let mut rounds = Vec::new();
         let mut handles = Vec::new();
@@ -353,18 +437,13 @@ impl Cortex {
                 // Inline generation to avoid referencing self across threads
                 let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}", model, api_key);
                 let payload = serde_json::json!({ "contents": [{"parts": [{"text": prompt}]}] });
-                
-                match cortex_ref.post(&url).json(&payload).send().await {
-                    Ok(res) => match res.json::<Value>().await {
-                        Ok(body) => {
-                            if let Some(text) = body["candidates"][0]["content"]["parts"][0]["text"].as_str() {
-                                return Some((p_name, text.to_string()));
-                            }
-                        },
-                        Err(_) => {}
-                    },
-                    Err(_) => {}
-                }
+
+                if let Ok(res) = cortex_ref.post(&url).json(&payload).send().await {
+                    if let Ok(body) = res.json::<Value>().await {
+                    if let Some(text) = body["candidates"][0]["content"]["parts"][0]["text"].as_str() {
+                        return Some((p_name, text.to_string()));
+                    }
+                } }
                 None
             }));
         }
@@ -372,7 +451,11 @@ impl Cortex {
         for handle in handles {
             if let Ok(Some((name, response))) = handle.await {
                 let round = Debate::parse_response(&name, &response);
-                println!("  🗣️  {}: Found {} issues.", name.cyan(), round.suggestions.len());
+                println!(
+                    "  🗣️  {}: Found {} issues.",
+                    name.cyan(),
+                    round.suggestions.len()
+                );
                 rounds.push(round);
             }
         }
@@ -383,14 +466,16 @@ impl Cortex {
     /// Phase 6: Semantic Linting
     async fn perform_lint(&self, path: &str) -> Result<Vec<LintViolation>> {
         println!("{}", format!("\n🕵️  LINTING: {}", path).yellow().bold());
-        
+
         let code = if Path::new(path).exists() {
             fs::read_to_string(path).unwrap_or_default()
         } else {
             return Err(anyhow::anyhow!("File not found: {}", path));
         };
 
-        if code.is_empty() { return Ok(vec![]); }
+        if code.is_empty() {
+            return Ok(vec![]);
+        }
 
         // Get context from graph for this file
         let context = match self.memory.get_neighborhood(path).await {
@@ -399,8 +484,10 @@ impl Cortex {
         };
 
         let prompt = SemanticLinter::lint_prompt(&code, &context);
-        let response = self.generate_sync(&self.config.primary_model, &prompt).await?;
-        
+        let response = self
+            .generate_sync(&self.config.primary_model, &prompt)
+            .await?;
+
         Ok(SemanticLinter::parse_response(&response))
     }
 }
@@ -412,23 +499,27 @@ struct IncrementalParser {
 
 impl IncrementalParser {
     fn new() -> Self {
-        Self { buffer: String::new(), processed_index: 0 }
+        Self {
+            buffer: String::new(),
+            processed_index: 0,
+        }
     }
 
     fn push(&mut self, token: &str) -> Vec<Action> {
         self.buffer.push_str(token);
         let mut actions = Vec::new();
-        let master_re = Regex::new(r"```(?P<lang>\w+)?\s*(?P<header>.*)\n(?P<content>[\s\S]*?)```").unwrap();
-        
+        let master_re =
+            Regex::new(r"```(?P<lang>\w+)?\s*(?P<header>.*)\n(?P<content>[\s\S]*?)```").unwrap();
+
         // Scan new content
         let sub_buffer = &self.buffer[self.processed_index..];
         for cap in master_re.captures_iter(sub_buffer) {
             let full_match = cap.get(0).unwrap();
             let block_str = full_match.as_str();
-            
+
             let block_actions = extract_code_blocks(block_str);
             actions.extend(block_actions);
-            
+
             self.processed_index += full_match.end();
         }
         actions
@@ -442,45 +533,56 @@ struct Tools;
 impl Tools {
     fn scan_workspace(root: &Path, manager: &ContextManager) -> String {
         let mut context = String::new();
-        let walker = WalkDir::new(root).into_iter();
-        for entry in walker.filter_entry(|e| !is_hidden(e)) {
-            if let Ok(entry) = entry {
-                if entry.file_type().is_file() {
+        for entry in WalkDir::new(root)
+            .into_iter()
+            .filter_entry(|e| !is_hidden(e))
+            .flatten()
+        {
+            if entry.file_type().is_file() {
                     let path = entry.path();
                     let rel_path = path.to_string_lossy().into_owned();
-                    
-                    if manager.is_hot(&rel_path) || rel_path.ends_with("main.rs") || rel_path.ends_with("TASKS.md") {
+
+                    if manager.is_hot(&rel_path)
+                        || rel_path.ends_with("main.rs")
+                        || rel_path.ends_with("TASKS.md")
+                    {
                         if let Ok(content) = fs::read_to_string(path) {
-                            context.push_str(&format!("\n--- FILE (HOT): {:?} ---\n{}\n", path, content));
+                            context.push_str(&format!(
+                                "\n--- FILE (HOT): {:?} ---\n{}\n",
+                                path, content
+                            ));
                         }
                     } else {
                         // Cold files: symbols only
                         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
                         if INCLUDE_EXTENSIONS.contains(&ext) {
-                             let file_data = Self::extract_symbols_from_file(path, ext);
-                             context.push_str(&format!("\n--- FILE (COLD/SYMBOLS): {:?} ---\n", path));
-                             for sym in file_data.symbols {
-                                 context.push_str(&format!("  SYMBOL: {}\n", sym));
-                             }
+                            let file_data = Self::extract_symbols_from_file(path, ext);
+                            context
+                                .push_str(&format!("\n--- FILE (COLD/SYMBOLS): {:?} ---\n", path));
+                            for sym in file_data.symbols {
+                                context.push_str(&format!("  SYMBOL: {}\n", sym));
+                            }
                         }
                     }
                 }
             }
-        }
         context
     }
 
     fn scan_symbols(root: &Path) -> String {
         let cache_path = Path::new(RALPH_DIR).join("symbol_cache.json");
         let cache: HashMap<String, (u64, Vec<String>)> = if cache_path.exists() {
-            fs::read_to_string(&cache_path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+            fs::read_to_string(&cache_path)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default()
         } else {
             HashMap::new()
         };
 
         let mut map = String::new();
         map.push_str("WORKSPACE SYMBOL MAP (HIERARCHY & SIGNATURES):\n");
-        
+
         // Collect all valid entries first (WalkDir is sync)
         let entries: Vec<_> = WalkDir::new(root)
             .into_iter()
@@ -488,38 +590,53 @@ impl Tools {
             .filter_map(|e| e.ok())
             .collect();
 
+        type SymbolResult = (String, Option<String>, Option<(u64, Vec<String>)>);
+
         // Process entries in parallel where possible
-        let processed_results: Vec<(String, Option<String>, Option<(u64, Vec<String>)>)> = entries.par_iter().map(|entry| {
-            let path = entry.path();
-            let rel_path = path.to_string_lossy().into_owned();
-            
-            if entry.file_type().is_dir() {
-                return (rel_path, Some(format!("DIR: {:?}\n", path)), None);
-            } else if entry.file_type().is_file() {
-                let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-                if !INCLUDE_EXTENSIONS.contains(&ext) { return (rel_path, None, None); }
-                
-                let meta = fs::metadata(path).ok();
-                let mtime = meta.and_then(|m| m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())).map(|d| d.as_secs()).unwrap_or(0);
-                
-                let symbols = if let Some((cached_mtime, cached_symbols)) = cache.get(&rel_path) {
-                    if *cached_mtime == mtime {
-                        cached_symbols.clone()
+        let processed_results: Vec<SymbolResult> = entries
+            .par_iter()
+            .map(|entry| {
+                let path = entry.path();
+                let rel_path = path.to_string_lossy().into_owned();
+
+                if entry.file_type().is_dir() {
+                    return (rel_path, Some(format!("DIR: {:?}\n", path)), None);
+                } else if entry.file_type().is_file() {
+                    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+                    if !INCLUDE_EXTENSIONS.contains(&ext) {
+                        return (rel_path, None, None);
+                    }
+
+                    let meta = fs::metadata(path).ok();
+                    let mtime = meta
+                        .and_then(|m| {
+                            m.modified()
+                                .ok()
+                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        })
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+
+                    let symbols = if let Some((cached_mtime, cached_symbols)) = cache.get(&rel_path)
+                    {
+                        if *cached_mtime == mtime {
+                            cached_symbols.clone()
+                        } else {
+                            Self::extract_symbols_from_file(path, ext).symbols
+                        }
                     } else {
                         Self::extract_symbols_from_file(path, ext).symbols
-                    }
-                } else {
-                    Self::extract_symbols_from_file(path, ext).symbols
-                };
+                    };
 
-                let mut file_map = format!("  FILE: {:?}\n", path);
-                for sym in &symbols {
-                    file_map.push_str(&format!("    SYMBOL: {}\n", sym));
+                    let mut file_map = format!("  FILE: {:?}\n", path);
+                    for sym in &symbols {
+                        file_map.push_str(&format!("    SYMBOL: {}\n", sym));
+                    }
+                    return (rel_path, Some(file_map), Some((mtime, symbols)));
                 }
-                return (rel_path, Some(file_map), Some((mtime, symbols)));
-            }
-            (rel_path, None, None)
-        }).collect();
+                (rel_path, None, None)
+            })
+            .collect();
 
         let mut new_cache = HashMap::new();
         for (rel_path, map_opt, cache_opt) in processed_results {
@@ -532,11 +649,15 @@ impl Tools {
                 new_cache.insert(rel_p, cp);
             }
         }
-        
-        let _ = fs::write(cache_path, serde_json::to_string(&new_cache).unwrap_or_default());
+
+        if let Err(e) = fs::write(
+            cache_path,
+            serde_json::to_string(&new_cache).unwrap_or_default(),
+        ) {
+            eprintln!("Cannon Warning: Failed to save symbol cache: {}", e);
+        }
         map
     }
-
 }
 
 pub struct FileSymbols {
@@ -545,36 +666,53 @@ pub struct FileSymbols {
 }
 
 impl Tools {
-
     fn extract_symbols_from_file(path: &Path, ext: &str) -> FileSymbols {
-        let mut result = FileSymbols { symbols: Vec::new(), dependencies: Vec::new() };
+        let mut result = FileSymbols {
+            symbols: Vec::new(),
+            dependencies: Vec::new(),
+        };
         let content = match fs::read_to_string(path) {
             Ok(s) => s,
-            Err(_) => return result,
+            Err(e) => {
+                eprintln!("Cannon Warning: Failed to read {:?}: {}", path, e);
+                return result;
+            }
         };
 
         if ext == "rs" {
-            if let Ok(file) = syn::parse_file(&content) {
-                let mut visitor = SemanticVisitor { symbols: Vec::new(), dependencies: Vec::new() };
-                visitor.visit_file(&file);
-                result.symbols = visitor.symbols;
-                result.dependencies = visitor.dependencies;
-                return result;
+            match syn::parse_file(&content) {
+                Ok(file) => {
+                    let mut visitor = SemanticVisitor {
+                        symbols: Vec::new(),
+                        dependencies: Vec::new(),
+                    };
+                    visitor.visit_file(&file);
+                    result.symbols = visitor.symbols;
+                    result.dependencies = visitor.dependencies;
+                    return result;
+                }
+                Err(e) => {
+                    eprintln!("Cannon Warning: Parse failed for {:?}: {}. Falling back to Regex.", path, e);
+                }
             }
         }
-        
-        // ... rest of fallback ...
 
         // Fallback for non-Rust or parse failures
-        let re = match ext {
-            "rs" => Regex::new(r"(?m)^(pub\s+)?(fn|struct|enum|type|trait|impl)\s+([A-Za-z0-9_]+)").unwrap(),
-            "js" | "ts" => Regex::new(r"(?m)^(export\s+)?(function|class|interface|type|const)\s+([A-Za-z0-9_]+)").unwrap(),
-            "py" => Regex::new(r"(?m)^def\s+([A-Za-z0-9_]+)").unwrap(),
-            _ => return result, // Changed `symbols` to `result` here to match the return type
+        let re_str = match ext {
+            "rs" => Some(r"(?m)^(pub\s+)?(fn|struct|enum|type|trait|impl)\s+([A-Za-z0-9_]+)"),
+            "js" | "ts" => Some(r"(?m)^(export\s+)?(function|class|interface|type|const)\s+([A-Za-z0-9_]+)"),
+            "py" => Some(r"(?m)^def\s+([A-Za-z0-9_]+)"),
+            _ => None,
         };
 
-        for cap in re.captures_iter(&content) {
-            if let Some(m) = cap.get(0) { result.symbols.push(m.as_str().to_string()); }
+        if let Some(pattern) = re_str {
+            if let Ok(re) = Regex::new(pattern) {
+                for cap in re.captures_iter(&content) {
+                    if let Some(m) = cap.get(0) {
+                        result.symbols.push(m.as_str().to_string());
+                    }
+                }
+            }
         }
         result
     }
@@ -621,33 +759,39 @@ impl Tools {
 
     async fn search_web(query: &str) -> Result<String> {
         // Placeholder for real search (e.g. Tavily)
-        Ok(format!("Search results for '{}': [Placeholder - implement via MCP for best results]", query))
+        Ok(format!(
+            "Search results for '{}': [Placeholder - implement via MCP for best results]",
+            query
+        ))
     }
 
     fn capture_screen(description: Option<&str>) -> Result<String> {
         let captures_dir = Path::new(RALPH_DIR).join("captures");
         fs::create_dir_all(&captures_dir)?;
-        
+
         let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
         let filename = format!("capture_{}.png", timestamp);
         let filepath = captures_dir.join(&filename);
-        
+
         // Use macOS screencapture command
         let output = Command::new("screencapture")
             .arg("-x") // No sound
             .arg("-C") // Capture cursor
             .arg(&filepath)
             .output()?;
-        
+
         if !output.status.success() {
-            return Err(anyhow::anyhow!("screencapture failed: {}", String::from_utf8_lossy(&output.stderr)));
+            return Err(anyhow::anyhow!(
+                "screencapture failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
         }
-        
+
         println!("📸 Captured: {}", filepath.display());
         if let Some(desc) = description {
             println!("   Context: {}", desc);
         }
-        
+
         Ok(filepath.to_string_lossy().to_string())
     }
 
@@ -656,19 +800,29 @@ impl Tools {
         let mut file = fs::File::open(path)?;
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer)?;
-        Ok(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &buffer))
+        Ok(base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &buffer,
+        ))
     }
 
     fn exec_shell(cmd: &str, autonomous: bool) -> Result<String> {
         if autonomous {
-            println!("{}", format!("⚡ AUTONOMOUS EXECUTION: {}", cmd).yellow().bold());
+            println!(
+                "{}",
+                format!("⚡ AUTONOMOUS EXECUTION: {}", cmd).yellow().bold()
+            );
             let output = Command::new("sh").arg("-c").arg(cmd).output()?;
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            
-            if !stdout.is_empty() { println!("{}", stdout.dimmed()); }
-            if !stderr.is_empty() { eprintln!("{}", stderr.red().dimmed()); }
-            
+
+            if !stdout.is_empty() {
+                println!("{}", stdout.dimmed());
+            }
+            if !stderr.is_empty() {
+                eprintln!("{}", stderr.red().dimmed());
+            }
+
             Ok(format!("STDOUT:\n{}\nSTDERR:\n{}", stdout, stderr))
         } else {
             println!("{}", format!("> {}", cmd).cyan());
@@ -676,27 +830,29 @@ impl Tools {
             io::stdout().flush()?;
             let mut input = String::new();
             io::stdin().read_line(&mut input)?;
-            
+
             if input.trim().eq_ignore_ascii_case("y") {
                 let output = Command::new("sh").arg("-c").arg(cmd).output()?;
                 io::stdout().write_all(&output.stdout)?;
                 io::stderr().write_all(&output.stderr)?;
-                
+
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                 Ok(format!("STDOUT:\n{}\nSTDERR:\n{}", stdout, stderr))
+                Ok(format!("STDOUT:\n{}\nSTDERR:\n{}", stdout, stderr))
             } else {
                 println!("{}", "Skipped.".yellow());
                 Ok("User skipped execution.".to_string())
             }
         }
     }
-    
+
     fn update_tasks_md() -> Result<()> {
         let tasks_path = Path::new("TASKS.md");
-        if !tasks_path.exists() { return Ok(()); }
+        if !tasks_path.exists() {
+            return Ok(());
+        }
         let content = fs::read_to_string(tasks_path)?;
-        
+
         // Final Sync: Archive completed tasks if they exceed limit
         let compressed = Self::compress_tasks(&content);
         fs::write(tasks_path, compressed)?;
@@ -721,7 +877,10 @@ impl Tools {
         if completed.len() > 5 {
             let archived_count = completed.len() - 2;
             let mut final_content = header.join("\n");
-            final_content.push_str(&format!("\n\n> [!NOTE]\n> Archived {} completed tasks.\n\n", archived_count));
+            final_content.push_str(&format!(
+                "\n\n> [!NOTE]\n> Archived {} completed tasks.\n\n",
+                archived_count
+            ));
             for line in completed.iter().skip(archived_count) {
                 final_content.push_str(&format!("{}\n", line));
             }
@@ -736,13 +895,15 @@ impl Tools {
 
     fn check_all_tasks_complete() -> bool {
         let path = Path::new("TASKS.md");
-        if !path.exists() { return false; }
+        if !path.exists() {
+            return false;
+        }
         if let Ok(content) = fs::read_to_string(path) {
             return !content.contains("[ ]");
         }
         false
     }
-    
+
     fn git_sync() -> Result<()> {
         Security::scan_git_diff()?;
         Command::new("git").args(["add", "."]).output()?;
@@ -783,12 +944,10 @@ impl<'ast> Visit<'ast> for SemanticVisitor {
         if let Some((_, trait_path, _)) = &i.trait_ {
             let tr = trait_path.to_token_stream().to_string();
             self.symbols.push(format!("impl {} for {}", tr, ty));
+        } else if let Some((_, path)) = ty.split_once(' ') {
+            self.symbols.push(format!("impl {}", path));
         } else {
-            if let Some((_, path)) = ty.split_once(' ') {
-                 self.symbols.push(format!("impl {}", path));
-            } else {
-                 self.symbols.push(format!("impl {}", ty));
-            }
+            self.symbols.push(format!("impl {}", ty));
         }
         visit::visit_item_impl(self, i);
     }
@@ -818,7 +977,7 @@ impl ShadowWorkspace {
         if !self.root.exists() {
             fs::create_dir_all(&self.root)?;
         }
-        
+
         // --- Shared Cache: Symlink target to reduce compile times ---
         let main_target = env::current_dir()?.join("target");
         let shadow_target = self.root.join("target");
@@ -833,21 +992,21 @@ impl ShadowWorkspace {
             let entry = entry?;
             let name = entry.file_name().to_str().unwrap_or("").to_string();
             let path = entry.path();
-            
+
             if SKIP_DIRS.contains(&name.as_str()) || name == "target" || name == "node_modules" {
-                 continue;
+                continue;
             }
-            
+
             let dest_path = self.root.join(&name);
-            
+
             // Basic Delta Check: only copy if dest doesn't exist or size/mtime differs
             let source_meta = fs::metadata(&path)?;
             let should_copy = if !dest_path.exists() {
                 true
             } else {
                 let dest_meta = fs::metadata(&dest_path)?;
-                source_meta.len() != dest_meta.len() || 
-                source_meta.modified()? != dest_meta.modified()?
+                source_meta.len() != dest_meta.len()
+                    || source_meta.modified()? != dest_meta.modified()?
             };
 
             if should_copy {
@@ -861,17 +1020,32 @@ impl ShadowWorkspace {
         Ok(())
     }
 
+    fn is_safe_path(path: &str) -> bool {
+        let p = Path::new(path);
+        !p.is_absolute() && !path.contains("..")
+    }
+
     fn stage_edit(&self, rel_path: &str, content: &str) -> Result<()> {
+        if !Self::is_safe_path(rel_path) {
+            return Err(anyhow::anyhow!("CRITICAL: Path traversal attempt: {}", rel_path));
+        }
         let full_path = self.root.join(rel_path);
-        if let Some(parent) = full_path.parent() { fs::create_dir_all(parent)?; }
+        if let Some(parent) = full_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         fs::write(full_path, content)?;
         Ok(())
     }
 
     fn commit(&self, rel_path: &str) -> Result<()> {
+        if !Self::is_safe_path(rel_path) {
+            return Err(anyhow::anyhow!("CRITICAL: Path traversal attempt: {}", rel_path));
+        }
         let shadow_path = self.root.join(rel_path);
         let real_path = Path::new(rel_path);
-        if let Some(parent) = real_path.parent() { fs::create_dir_all(parent)?; }
+        if let Some(parent) = real_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         fs::copy(shadow_path, real_path)?;
         Ok(())
     }
@@ -884,9 +1058,9 @@ struct HotCheck {
 
 impl HotCheck {
     fn new() -> Self {
-        Self { 
-            child: None, 
-            root: Path::new(RALPH_DIR).join("shadow")
+        Self {
+            child: None,
+            root: Path::new(RALPH_DIR).join("shadow"),
         }
     }
 
@@ -903,7 +1077,7 @@ impl HotCheck {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()?;
-        
+
         self.child = Some(child);
         Ok(())
     }
@@ -918,7 +1092,11 @@ impl HotCheck {
 }
 
 fn show_diff(path: &str, new_content: &str) -> Result<()> {
-    let old_content = if Path::new(path).exists() { fs::read_to_string(path)? } else { String::new() };
+    let old_content = if Path::new(path).exists() {
+        fs::read_to_string(path)?
+    } else {
+        String::new()
+    };
     let diff = TextDiff::from_lines(old_content.as_str(), new_content);
     println!("{}", format!("\n--- DIFF: {} ---", path).cyan().bold());
     for change in diff.iter_all_changes() {
@@ -935,9 +1113,15 @@ fn show_diff(path: &str, new_content: &str) -> Result<()> {
 
 fn is_hidden(entry: &walkdir::DirEntry) -> bool {
     let name = entry.file_name().to_str().unwrap_or("");
-    if name == "." || name == "" { return false; }
-    if SKIP_DIRS.contains(&name) { return true; }
-    if name.starts_with(".") && name != ".env" && name != ".ralph" && name != ".gitignore" { return true; }
+    if name == "." || name.is_empty() {
+        return false;
+    }
+    if SKIP_DIRS.contains(&name) {
+        return true;
+    }
+    if name.starts_with(".") && name != ".env" && name != ".ralph" && name != ".gitignore" {
+        return true;
+    }
     false
 }
 
@@ -951,7 +1135,9 @@ impl Security {
         let diff = String::from_utf8_lossy(&output.stdout);
         let google_re = Regex::new(r"AIzaSy[A-Za-z0-9-_]{33}").unwrap();
         if google_re.is_match(&diff) {
-             return Err(anyhow::anyhow!("🚨 SECURITY ALERT: Google API Key detected in git staging! Operation aborted."));
+            return Err(anyhow::anyhow!(
+                "🚨 SECURITY ALERT: Google API Key detected in git staging! Operation aborted."
+            ));
         }
         Ok(())
     }
@@ -969,21 +1155,36 @@ enum Action {
     SearchWeb(String),
     CaptureUI(Option<String>),
     CallWasm(String, Vec<i32>), // function name, args
-    Debate(String), // topic/proposal
-    Snapshot(String), // label
-    Restore(String), // id
-    Lint(String), // path
+    Debate(String),             // topic/proposal
+    Snapshot(String),           // label
+    Restore(String),            // id
+    Lint(String),               // path
 }
 
 fn extract_code_blocks(response: &str) -> Vec<Action> {
     let mut actions = Vec::new();
     let master_re = Regex::new(r"```(\w+)?\s*(.*)\n([\s\S]*?)```").unwrap();
-    let known_langs = ["rust", "python", "bash", "sh", "javascript", "typescript", "toml", "json", "yaml", "html", "css", "sql", "text", "md"];
-    
+    let known_langs = [
+        "rust",
+        "python",
+        "bash",
+        "sh",
+        "javascript",
+        "typescript",
+        "toml",
+        "json",
+        "yaml",
+        "html",
+        "css",
+        "sql",
+        "text",
+        "md",
+    ];
+
     for cap in master_re.captures_iter(response) {
         let lang = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
         let header_path_raw = cap.get(2).map(|m| m.as_str().trim()).unwrap_or("");
-        
+
         let header_path = header_path_raw
             .trim_start_matches("<!--")
             .trim_end_matches("-->")
@@ -991,9 +1192,9 @@ fn extract_code_blocks(response: &str) -> Vec<Action> {
             .trim_start_matches("#")
             .trim_start_matches(":")
             .trim();
-        
+
         let content = cap.get(3).map(|m| m.as_str()).unwrap_or("");
-        
+
         // Priority 1: Structured JSON Directives
         if (lang == "json" || content.trim().starts_with('{')) && content.trim().ends_with('}') {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(content.trim()) {
@@ -1002,33 +1203,44 @@ fn extract_code_blocks(response: &str) -> Vec<Action> {
                 continue;
             }
         }
-        
+
         let is_shell_lang = lang == "bash" || lang == "sh" || lang == "shell" || lang == "zsh";
         let looks_like_file = header_path.contains('.') || header_path.contains('/');
         let is_ambiguous_lang = known_langs.contains(&header_path.to_lowercase().as_str());
-        
+
         // Priority 2: Header Check (Sanitized)
         if !header_path.is_empty() && !is_shell_lang && looks_like_file && !is_ambiguous_lang {
-             actions.push(Action::WriteFile(header_path.to_string(), content.to_string()));
-             continue;
+            actions.push(Action::WriteFile(
+                header_path.to_string(),
+                content.to_string(),
+            ));
+            continue;
         }
-        
+
         let mut found_path = None;
         for line in content.lines().take(2) {
-             let text = line.trim();
-             if text.starts_with("// ") || text.starts_with("# ") {
-                 let potential_path = text[2..].trim();
-                 if potential_path.contains('.') || potential_path.contains('/') {
-                     found_path = Some(potential_path.to_string());
-                     break;
-                 }
-             }
+            let text = line.trim();
+            if text.starts_with("// ") || text.starts_with("# ") {
+                let potential_path = text[2..].trim();
+                if potential_path.contains('.') || potential_path.contains('/') {
+                    found_path = Some(potential_path.to_string());
+                    break;
+                }
+            }
         }
-        if let Some(p) = found_path { actions.push(Action::WriteFile(p, content.to_string())); continue; }
-        
-        let shell_keywords = ["pip ", "cargo ", "npm ", "git ", "apt-get ", "ls ", "cd ", "echo ", "rm ", "mkdir ", "touch "];
-        let has_keyword = shell_keywords.iter().any(|kw| content.trim().starts_with(kw));
-        
+        if let Some(p) = found_path {
+            actions.push(Action::WriteFile(p, content.to_string()));
+            continue;
+        }
+
+        let shell_keywords = [
+            "pip ", "cargo ", "npm ", "git ", "apt-get ", "ls ", "cd ", "echo ", "rm ", "mkdir ",
+            "touch ",
+        ];
+        let has_keyword = shell_keywords
+            .iter()
+            .any(|kw| content.trim().starts_with(kw));
+
         if is_shell_lang || has_keyword {
             let mut final_cmd = content.trim().to_string();
             if final_cmd.is_empty() && !header_path.is_empty() && !looks_like_file {
@@ -1040,20 +1252,20 @@ fn extract_code_blocks(response: &str) -> Vec<Action> {
         }
 
         if lang == "mcp" {
-             if let Ok(val) = serde_json::from_str::<serde_json::Value>(content) {
-                 let server = val["server"].as_str().unwrap_or("").to_string();
-                 let tool = val["tool"].as_str().unwrap_or("").to_string();
-                 let args = val["arguments"].clone();
-                 if !server.is_empty() && !tool.is_empty() {
-                     actions.push(Action::CallMcpTool(server, tool, args));
-                 }
-             }
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(content) {
+                let server = val["server"].as_str().unwrap_or("").to_string();
+                let tool = val["tool"].as_str().unwrap_or("").to_string();
+                let args = val["arguments"].clone();
+                if !server.is_empty() && !tool.is_empty() {
+                    actions.push(Action::CallMcpTool(server, tool, args));
+                }
+            }
         }
-        
+
         if lang == "url" {
             actions.push(Action::ReadUrl(content.trim().to_string()));
         }
-        
+
         if lang == "search" {
             actions.push(Action::SearchWeb(content.trim().to_string()));
         }
@@ -1065,7 +1277,10 @@ fn extract_code_blocks(response: &str) -> Vec<Action> {
         if lang == "wasm" {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(content) {
                 let func = val["function"].as_str().unwrap_or("run").to_string();
-                let args = val["args"].as_array().unwrap_or(&vec![]).iter()
+                let args = val["args"]
+                    .as_array()
+                    .unwrap_or(&vec![])
+                    .iter()
                     .filter_map(|v| v.as_i64().map(|i| i as i32))
                     .collect();
                 actions.push(Action::CallWasm(func, args));
@@ -1073,13 +1288,13 @@ fn extract_code_blocks(response: &str) -> Vec<Action> {
         }
 
         if lang == "debate" {
-             actions.push(Action::Debate(content.trim().to_string()));
+            actions.push(Action::Debate(content.trim().to_string()));
         }
 
         if lang == "snapshot" {
             actions.push(Action::Snapshot(content.trim().to_string()));
         }
-    
+
         if lang == "restore" {
             actions.push(Action::Restore(content.trim().to_string()));
         }
@@ -1103,7 +1318,11 @@ fn init_workspace() -> Result<()> {
     let toml = toml::to_string_pretty(&config)?;
     fs::write(ralph_path.join("config.toml"), toml)?;
     let gitignore_path = Path::new(".gitignore");
-    let mut gitignore = if gitignore_path.exists() { fs::read_to_string(gitignore_path)? } else { String::new() };
+    let mut gitignore = if gitignore_path.exists() {
+        fs::read_to_string(gitignore_path)?
+    } else {
+        String::new()
+    };
     if !gitignore.contains(".ralph") {
         use std::fmt::Write as _;
         writeln!(gitignore, "\n# Ralph Agent Data\n.ralph/")?;
@@ -1117,29 +1336,32 @@ fn init_workspace() -> Result<()> {
 async fn run_worker_loop() -> Result<()> {
     let worker_id = env::var("RALPH_WORKER_ID").unwrap_or_else(|_| "worker-0".to_string());
     println!("🐝 Worker {} starting...", worker_id);
-    
+
     dotenvy::from_filename(".env").ok();
     let config_path = format!("{}/config.toml", RALPH_DIR);
     let config_str = fs::read_to_string(&config_path).unwrap_or_default();
     let config: RalphConfig = toml::from_str(&config_str).unwrap_or_default();
-    
+
     let memory = Arc::new(Memory::new(&format!("{}/lancedb", RALPH_DIR)).await?);
     let cortex = Cortex::new(config, Arc::clone(&memory))?;
-    
+
     let status_path = format!("{}/swarm/{}/status.json", RALPH_DIR, worker_id);
     let task_path = format!("{}/swarm/{}/task.json", RALPH_DIR, worker_id);
-    
+
     let mut completed_tasks_count = 0;
-    
+
     loop {
         // Check for a task file
         if Path::new(&task_path).exists() {
             if let Ok(content) = fs::read_to_string(&task_path) {
                 if let Ok(task_val) = serde_json::from_str::<Value>(&content) {
-                    let task = task_val["objective"].as_str().unwrap_or_default().to_string();
+                    let task = task_val["objective"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string();
                     if !task.is_empty() {
                         println!("🐝 Worker {} executing: {}", worker_id, task);
-                        
+
                         // Update status to Working
                         let status = swarm::WorkerStatus {
                             id: worker_id.clone(),
@@ -1149,37 +1371,45 @@ async fn run_worker_loop() -> Result<()> {
                             completed_tasks: completed_tasks_count,
                             subtasks_completed: Vec::new(),
                         };
-                        let _ = fs::write(&status_path, serde_json::to_string_pretty(&status).unwrap_or_default());
-                        
+                        let _ = fs::write(
+                            &status_path,
+                            serde_json::to_string_pretty(&status).unwrap_or_default(),
+                        );
+
                         // Execute the task
                         let prompt = format!("Execute this task autonomously:\n{}", task);
                         if let Ok(mut stream) = cortex.stream_generate(&prompt, None, None).await {
-                             let mut response = String::new();
-                             while let Some(chunk) = stream.next().await {
-                                 if let Ok(token) = chunk { response.push_str(&token); }
-                             }
-                             println!("✅ Worker {} COMPLETED task.", worker_id);
-                             completed_tasks_count += 1;
-                             
-                             // Report completion in status
-                             let final_status = swarm::WorkerStatus {
-                                 id: worker_id.clone(),
-                                 state: swarm::WorkerState::Idle,
-                                 current_task: None,
-                                 assigned_task: None,
-                                 completed_tasks: completed_tasks_count,
-                                 subtasks_completed: vec![task.clone()],
-                             };
-                             let _ = fs::write(&status_path, serde_json::to_string_pretty(&final_status).unwrap_or_default());
+                            let mut response = String::new();
+                            while let Some(chunk) = stream.next().await {
+                                if let Ok(token) = chunk {
+                                    response.push_str(&token);
+                                }
+                            }
+                            println!("✅ Worker {} COMPLETED task.", worker_id);
+                            completed_tasks_count += 1;
+
+                            // Report completion in status
+                            let final_status = swarm::WorkerStatus {
+                                id: worker_id.clone(),
+                                state: swarm::WorkerState::Idle,
+                                current_task: None,
+                                assigned_task: None,
+                                completed_tasks: completed_tasks_count,
+                                subtasks_completed: vec![task.clone()],
+                            };
+                            let _ = fs::write(
+                                &status_path,
+                                serde_json::to_string_pretty(&final_status).unwrap_or_default(),
+                            );
                         }
-                        
+
                         // Remove task file to signal completion
                         let _ = fs::remove_file(&task_path);
                     }
                 }
             }
         }
-        
+
         sleep(Duration::from_secs(2)).await;
     }
 }
@@ -1187,7 +1417,13 @@ async fn run_worker_loop() -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
-    if args.len() > 1 && args[1] == "init" { return init_workspace(); }
+    if args.len() > 1 && args[1] == "init" {
+        return init_workspace();
+    }
+    if args.len() > 1 && args[1] == "--version" {
+        println!("ralph-nano v0.2.4");
+        return Ok(());
+    }
     if args.contains(&"--worker-mode".to_string()) {
         return run_worker_loop().await;
     }
@@ -1196,12 +1432,13 @@ async fn main() -> Result<()> {
     }
     dotenvy::from_filename(".env").ok();
     let config_path = format!("{}/config.toml", RALPH_DIR);
-    let config_str = fs::read_to_string(&config_path).context(format!("Could not read config at {}", config_path))?;
+    let config_str = fs::read_to_string(&config_path)
+        .context(format!("Could not read config at {}", config_path))?;
     let config: RalphConfig = toml::from_str(&config_str)?;
-    
+
     let memory = Arc::new(Memory::new(&format!("{}/lancedb", RALPH_DIR)).await?);
     let cortex = Cortex::new(config, Arc::clone(&memory))?;
-    
+
     let mut loop_count = 0;
     let mut last_output = String::new();
     let mut idle_announced = false;
@@ -1217,7 +1454,7 @@ async fn main() -> Result<()> {
         println!("{}", "⚠️ WARNING: AUTONOMOUS MODE ENABLED".yellow().bold());
         Telemetry::notify("Autonomy Active", "Ralph is operating in headless mode.");
     }
-    
+
     let mut swarm_manager = swarm::SwarmManager::new(Path::new("."));
 
     // Initialize Swarm Manager for parallel task execution
@@ -1240,22 +1477,29 @@ async fn main() -> Result<()> {
     let knowledge = KnowledgeEngine::new(Arc::clone(&memory));
     let knowledge_sync = knowledge.clone();
     let _autonomous_learning = cortex.config.autonomous_mode;
-    
+
     tokio::spawn(async move {
         sleep(Duration::from_secs(5)).await; // Wait for core boot to finish
         println!("🧠 Auto-Didact Phase: Scanning for documentation...");
         if let Err(e) = knowledge_sync.ingest_workspace(Path::new(".")).await {
             eprintln!("Auto-Didact ingestion failed: {}", e);
         }
-        
+
         // --- REGISTRY MONITOR ---
         if let Ok(updates) = knowledge_sync.check_library_updates().await {
             if !updates.is_empty() {
                 println!("\n🔔 {}", "REGISTRY UPDATES AVAILABLE:".yellow().bold());
                 for (lib, _local, latest) in updates {
-                    println!("  * {} has version {} available.", lib.cyan(), latest.green());
+                    println!(
+                        "  * {} has version {} available.",
+                        lib.cyan(),
+                        latest.green()
+                    );
                 }
-                Telemetry::notify("Documentation Updates", "New library versions are available in the registry.");
+                Telemetry::notify(
+                    "Documentation Updates",
+                    "New library versions are available in the registry.",
+                );
             }
         }
     });
@@ -1273,8 +1517,18 @@ async fn main() -> Result<()> {
         println!("   Tech Stack: {}", fingerprint.tech_stack.join(", "));
     }
     if !fingerprint.dependencies.is_empty() {
-        println!("   Top Deps: {}", fingerprint.dependencies.iter().take(5).map(|d| d.name.clone()).collect::<Vec<_>>().join(", "));
+        println!(
+            "   Top Deps: {}",
+            fingerprint
+                .dependencies
+                .iter()
+                .take(5)
+                .map(|d| d.name.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
+    println!("DEBUG: Fingerprint done.");
 
     // Load MCP Servers from local config
     let mcp_config_path = Path::new("mcp_config.json");
@@ -1290,7 +1544,7 @@ async fn main() -> Result<()> {
                         } else {
                             Vec::new()
                         };
-                        
+
                         if !cmd.is_empty() {
                             if let Err(e) = mcp_manager.add_server(name, cmd, &args).await {
                                 eprintln!("Failed to start MCP server {}: {}", name, e);
@@ -1304,22 +1558,34 @@ async fn main() -> Result<()> {
         }
     }
 
+    println!("DEBUG: MCP checks done.");
     // --- AUTO-DIDACT: Knowledge Engine Scan ---
+    println!("DEBUG: Starting Knowledge Engine Scan...");
     let knowledge = KnowledgeEngine::new(Arc::clone(&memory));
     if let Ok(libs) = knowledge.scan_all_dependencies() {
+        println!("DEBUG: Scanned dependencies. Fetching known libs...");
         let known_libs = memory.get_known_libraries().await.unwrap_or_default();
-        let missing_libs: Vec<_> = libs.iter()
+        println!("DEBUG: Got known libs: {}", known_libs.len());
+        let missing_libs: Vec<_> = libs
+            .iter()
             .filter(|l| !known_libs.contains(&l.name))
             .collect();
-            
+
         if !missing_libs.is_empty() {
             if cortex.config.autonomous_mode {
                 for lib in missing_libs {
                     let _ = knowledge.ingest_library(lib).await;
                 }
             } else {
-                print!("📚 Found new libraries: {}. Ingest docs? [y/N]: ", 
-                    missing_libs.iter().map(|l| l.name.as_str()).collect::<Vec<_>>().join(", ").cyan());
+                print!(
+                    "📚 Found new libraries: {}. Ingest docs? [y/N]: ",
+                    missing_libs
+                        .iter()
+                        .map(|l| l.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                        .cyan()
+                );
                 io::stdout().flush()?;
                 let mut confirm = String::new();
                 io::stdin().read_line(&mut confirm)?;
@@ -1332,6 +1598,7 @@ async fn main() -> Result<()> {
         }
     }
 
+    println!("DEBUG: Knowledge Engine Scan done.");
     // --- REGISTRY MONITOR ---
     let knowledge_sync = knowledge.clone();
     tokio::spawn(async move {
@@ -1341,9 +1608,16 @@ async fn main() -> Result<()> {
             if !updates.is_empty() {
                 println!("\n🔔 {}", "REGISTRY UPDATES AVAILABLE:".yellow().bold());
                 for (lib, _local, latest) in updates {
-                    println!("  * {} has version {} available.", lib.cyan(), latest.green());
+                    println!(
+                        "  * {} has version {} available.",
+                        lib.cyan(),
+                        latest.green()
+                    );
                 }
-                Telemetry::notify("Documentation Updates", "New library versions are available in the registry.");
+                Telemetry::notify(
+                    "Documentation Updates",
+                    "New library versions are available in the registry.",
+                );
             }
         }
     });
@@ -1352,12 +1626,17 @@ async fn main() -> Result<()> {
         // POLLING STOP CONDITION
         if Tools::check_all_tasks_complete() {
             if !idle_announced {
-                println!("{}", "\n✅ All tasks complete. Watching TASKS.md for new items...".green().bold());
+                println!(
+                    "{}",
+                    "\n✅ All tasks complete. Watching TASKS.md for new items..."
+                        .green()
+                        .bold()
+                );
                 let _ = Tools::git_sync();
                 idle_announced = true;
             }
             sleep(Duration::from_secs(5)).await;
-            continue; 
+            continue;
         }
 
         // Resume from idle
@@ -1371,42 +1650,63 @@ async fn main() -> Result<()> {
         if cortex.config.autonomous_mode {
             loop_count += 1;
             if loop_count > cortex.config.max_autonomous_loops {
-                println!("{}", "\n🛑 MAX AUTONOMOUS LOOPS REACHED. STOPPING.".red().bold());
-                Telemetry::notify("Circuit Breaker", "Max loop count reached. Stopping safely.");
+                println!(
+                    "{}",
+                    "\n🛑 MAX AUTONOMOUS LOOPS REACHED. STOPPING.".red().bold()
+                );
+                Telemetry::notify(
+                    "Circuit Breaker",
+                    "Max loop count reached. Stopping safely.",
+                );
                 Telemetry::speak("Autonomous loop capacity reached. Shutting down.");
                 break;
             }
-            println!("\n🌀 Loop {}/{}", loop_count, cortex.config.max_autonomous_loops);
+            println!(
+                "\n🌀 Loop {}/{}",
+                loop_count, cortex.config.max_autonomous_loops
+            );
         }
 
         let input;
-        
+
         if cortex.config.autonomous_mode {
             if !last_output.is_empty() {
                 input = format!("Previous command output:\n{}\n\nProceed next.", last_output);
                 last_output.clear();
             } else {
-                 input = "Proceed with the next unchecked task in TASKS.md.".to_string();
+                input = "Proceed with the next unchecked task in TASKS.md.".to_string();
             }
         } else {
             print!("{}", "\nralph> ".blue().bold());
             io::stdout().flush()?;
             let mut buf = String::new();
-            if io::stdin().read_line(&mut buf)? == 0 { break; }
+            if io::stdin().read_line(&mut buf)? == 0 {
+                break;
+            }
             input = buf.trim().to_string();
-            if input.is_empty() { continue; }
-            if input == "exit" { break; }
+            if input.is_empty() {
+                continue;
+            }
+            if input == "exit" {
+                break;
+            }
         }
 
         println!("{}", "reading workspace...".dimmed());
-        
+
         let config_clone = cortex.config.clone();
-        let hot_list = context_manager.hot_files.keys().cloned().collect::<Vec<_>>();
-        
+        let hot_list = context_manager
+            .hot_files
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+
         let hot_list_sync = hot_list.clone();
         let context_handle = tokio::spawn(async move {
             let mut temp_manager = ContextManager::new();
-            for f in hot_list_sync { temp_manager.mark_hot(&f); }
+            for f in hot_list_sync {
+                temp_manager.mark_hot(&f);
+            }
 
             if config_clone.role == RalphRole::Supervisor {
                 Tools::scan_symbols(Path::new("."))
@@ -1438,7 +1738,7 @@ async fn main() -> Result<()> {
         }
 
         let context = context_handle.await.context("Context scan failed")?;
-        
+
         // --- AUTO-DIDACT: Search Official Docs (with Re-ranking) ---
         let mut docs_context = String::new();
         // Phase 5: Fetch more candidates (20) and re-rank locally to top 3
@@ -1453,7 +1753,10 @@ async fn main() -> Result<()> {
                 };
 
                 if !docs.is_empty() {
-                    println!("\n📚 {}", "OFFICIAL DOCS CONTEXT (RE-RANKED):".cyan().bold());
+                    println!(
+                        "\n📚 {}",
+                        "OFFICIAL DOCS CONTEXT (RE-RANKED):".cyan().bold()
+                    );
                     docs_context.push_str("[OFFICIAL_DOCS_CONTEXT]\n");
                     for doc in &docs {
                         println!("  * Found relevant documentation chunk.");
@@ -1463,15 +1766,19 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        
+
         // Gather MCP Tools
         let mut mcp_context = String::new();
         if let Ok(all_tools) = mcp_manager.get_all_tools().await {
             for (server, tools) in all_tools {
                 mcp_context.push_str(&format!("\nMCP SERVER: {}\n", server));
                 for tool in tools {
-                    mcp_context.push_str(&format!("  TOOL: {}\n    DESC: {}\n    SCHEMA: {}\n", 
-                        tool.name, tool.description, serde_json::to_string(&tool.input_schema).unwrap_or_default()));
+                    mcp_context.push_str(&format!(
+                        "  TOOL: {}\n    DESC: {}\n    SCHEMA: {}\n",
+                        tool.name,
+                        tool.description,
+                        serde_json::to_string(&tool.input_schema).unwrap_or_default()
+                    ));
                 }
             }
         }
@@ -1479,16 +1786,16 @@ async fn main() -> Result<()> {
         // --- PREDICTIVE CONTEXT: Graph Neighborhood ---
         let mut predictive_context = String::new();
         if !hot_list.is_empty() {
-             for f in hot_list.iter().take(3) {
-                 if let Ok(neighbors) = memory.get_neighborhood(f).await {
-                     if !neighbors.is_empty() {
-                         predictive_context.push_str(&format!("\nPREDICTIVE CONTEXT for {}:\n", f));
-                         for n in neighbors {
-                             predictive_context.push_str(&format!("- {}\n", n));
-                         }
-                     }
-                 }
-             }
+            for f in hot_list.iter().take(3) {
+                if let Ok(neighbors) = memory.get_neighborhood(f).await {
+                    if !neighbors.is_empty() {
+                        predictive_context.push_str(&format!("\nPREDICTIVE CONTEXT for {}:\n", f));
+                        for n in neighbors {
+                            predictive_context.push_str(&format!("- {}\n", n));
+                        }
+                    }
+                }
+            }
         }
 
         let cacheable_context = format!(
@@ -1499,7 +1806,7 @@ async fn main() -> Result<()> {
              if cortex.config.role == RalphRole::Supervisor { "TECHNICAL SUPERVISOR" } else { "AUTONOMOUS EXECUTOR" },
              fingerprint.specialized_prompt(),
              if !fingerprint.dependency_context().is_empty() { format!("{}\n", fingerprint.dependency_context()) } else { String::new() },
-             context, 
+             context,
              if !mcp_context.is_empty() { format!("AVAILABLE MCP TOOLS:\n{}\n\n", mcp_context) } else { String::new() },
              if !heuristics_context.is_empty() { format!("LEARNED HEURISTICS:\n{}\n", heuristics_context) } else { String::new() },
              docs_context,
@@ -1531,7 +1838,7 @@ async fn main() -> Result<()> {
         };
 
         let dynamic_query = format!("USER REQUEST/STATUS: {}\n\n{}", input, instructions);
-        
+
         // Check semantic cache first
         let full_prompt = format!("{}\n{}", cacheable_context, dynamic_query);
         let cached_response = memory.check_cache(&full_prompt).await.ok().flatten();
@@ -1543,10 +1850,16 @@ async fn main() -> Result<()> {
             let images = if let Some(path) = &last_captured_image {
                 if let Ok(b64) = Tools::read_capture_as_base64(path) {
                     Some(vec![b64])
-                } else { None }
-            } else { None };
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
-            let mut stream = cortex.stream_generate(&dynamic_query, Some(&cacheable_context), images).await?;
+            let mut stream = cortex
+                .stream_generate(&dynamic_query, Some(&cacheable_context), images)
+                .await?;
             // Clear used image
             last_captured_image = None;
 
@@ -1571,85 +1884,101 @@ async fn main() -> Result<()> {
             match action {
                 Action::WriteFile(path, content) => {
                     if cortex.config.role == RalphRole::Executor {
-                         println!("\n🛠️ Staging {}...", path.yellow());
-                         if let Err(e) = shadow.stage_edit(&path, &content) { println!("Failed to stage: {}", e); continue; }
-                         context_manager.mark_hot(&path);
-                         let _ = hot_check.trigger();
+                        println!("\n🛠️ Staging {}...", path.yellow());
+                        if let Err(e) = shadow.stage_edit(path, content) {
+                            println!("Failed to stage: {}", e);
+                            continue;
+                        }
+                        context_manager.mark_hot(path);
+                        let _ = hot_check.trigger();
                     }
-                },
-                    Action::ExecShell(cmd) => {
-                        println!("\n🐚 Ready to exec: {}", cmd.cyan());
-                    },
-                    Action::Directive(val) => {
-                        println!("\n📋 Directive: {:?}", val);
-                    },
-                    Action::CallMcpTool(server, tool, args) => {
-                        println!("\n🔌 Calling MCP Tool: {}/{}...", server.cyan(), tool.cyan());
-                        match mcp_manager.call_tool(&server, &tool, args.clone()).await {
-                             Ok(res) => {
-                                 println!("✅ MCP Result: {}", serde_json::to_string_pretty(&res).unwrap_or_default().dimmed());
-                                 last_output.push_str(&format!("MCP Tool {} output: {}\n", tool, res));
-                             },
-                             Err(e) => println!("❌ MCP tool error: {}", e),
+                }
+                Action::ExecShell(cmd) => {
+                    println!("\n🐚 Ready to exec: {}", cmd.cyan());
+                }
+                Action::Directive(val) => {
+                    println!("\n📋 Directive: {:?}", val);
+                }
+                Action::CallMcpTool(server, tool, args) => {
+                    println!(
+                        "\n🔌 Calling MCP Tool: {}/{}...",
+                        server.cyan(),
+                        tool.cyan()
+                    );
+                    match mcp_manager.call_tool(server, tool, args.clone()).await {
+                        Ok(res) => {
+                            println!(
+                                "✅ MCP Result: {}",
+                                serde_json::to_string_pretty(&res)
+                                    .unwrap_or_default()
+                                    .dimmed()
+                            );
+                            last_output.push_str(&format!("MCP Tool {} output: {}\n", tool, res));
                         }
-                    },
-                    Action::ReadUrl(url) => {
-                        println!("\n🌐 Reading URL: {}...", url.cyan());
-                        match Tools::read_url(&url).await {
-                             Ok(text) => {
-                                 println!("✅ Read {} chars.", text.len());
-                                 last_output.push_str(&format!("Content from {}:\n{}\n", url, text));
-                             },
-                             Err(e) => println!("❌ Web error: {}", e),
+                        Err(e) => println!("❌ MCP tool error: {}", e),
+                    }
+                }
+                Action::ReadUrl(url) => {
+                    println!("\n🌐 Reading URL: {}...", url.cyan());
+                    match Tools::read_url(url).await {
+                        Ok(text) => {
+                            println!("✅ Read {} chars.", text.len());
+                            last_output.push_str(&format!("Content from {}:\n{}\n", url, text));
                         }
-                    },
-                    Action::SearchWeb(query) => {
-                        println!("\n🔎 Searching: {}...", query.cyan());
-                        match Tools::search_web(&query).await {
-                             Ok(res) => {
-                                 println!("✅ Search results received.");
-                                 last_output.push_str(&format!("Search results for {}:\n{}\n", query, res));
-                             },
-                             Err(e) => println!("❌ Search error: {}", e),
+                        Err(e) => println!("❌ Web error: {}", e),
+                    }
+                }
+                Action::SearchWeb(query) => {
+                    println!("\n🔎 Searching: {}...", query.cyan());
+                    match Tools::search_web(query).await {
+                        Ok(res) => {
+                            println!("✅ Search results received.");
+                            last_output
+                                .push_str(&format!("Search results for {}:\n{}\n", query, res));
                         }
-                    },
-                    Action::CaptureUI(desc) => {
-                        println!("\n📸 Capturing UI...");
-                        match Tools::capture_screen(desc.as_deref()) {
-                            Ok(path) => {
-                                println!("✅ Capture saved: {}", path.cyan());
-                                last_output.push_str(&format!("Visual Capture saved to: {}\nAnalyze this screenshot for visual verification.\n", path));
-                                last_captured_image = Some(path);
-                            },
+                        Err(e) => println!("❌ Search error: {}", e),
+                    }
+                }
+                Action::CaptureUI(desc) => {
+                    println!("\n📸 Capturing UI...");
+                    match Tools::capture_screen(desc.as_deref()) {
+                        Ok(path) => {
+                            println!("✅ Capture saved: {}", path.cyan());
+                            last_output.push_str(&format!("Visual Capture saved to: {}\nAnalyze this screenshot for visual verification.\n", path));
+                            last_captured_image = Some(path);
+                        }
                         Err(e) => println!("❌ Capture failed: {}", e),
-                        }
-                    },
-                    Action::CallWasm(func, args) => {
-                        println!("\n🧬 Calling WASM Plugin: {}...", func.cyan());
-                        // For MVP: Search for .wasm files in .ralph/plugins
-                        let plugin_path = format!("{}/plugins/{}.wasm", RALPH_DIR, func);
-                        if Path::new(&plugin_path).exists() {
-                            if let Ok(wasm_bytes) = fs::read(&plugin_path) {
-                                match wasm_runtime.execute(&wasm_bytes, &func, args.clone()) {
-                                    Ok(res) => {
-                                        println!("✅ WASM Result: {}", res);
-                                        last_output.push_str(&format!("WASM Tool {} output: {}\n", func, res));
-                                    },
-                                    Err(e) => println!("❌ WASM execution error: {}", e),
-                                }
-                            }
-                        } else {
-                            println!("❌ WASM Plugin not found: {}", plugin_path);
-                        }
-                    },
-                    Action::Debate(_) | Action::Snapshot(_) | Action::Restore(_) | Action::Lint(_) => {
-                        // These are handled in the final pass after streaming
                     }
+                }
+                Action::CallWasm(func, args) => {
+                    println!("\n🧬 Calling WASM Plugin: {}...", func.cyan());
+                    // For MVP: Search for .wasm files in .ralph/plugins
+                    let plugin_path = format!("{}/plugins/{}.wasm", RALPH_DIR, func);
+                    if Path::new(&plugin_path).exists() {
+                        if let Ok(wasm_bytes) = fs::read(&plugin_path) {
+                            match wasm_runtime.execute(&wasm_bytes, func, args.clone()) {
+                                Ok(res) => {
+                                    println!("✅ WASM Result: {}", res);
+                                    last_output
+                                        .push_str(&format!("WASM Tool {} output: {}\n", func, res));
+                                }
+                                Err(e) => println!("❌ WASM execution error: {}", e),
+                            }
+                        }
+                    } else {
+                        println!("❌ WASM Plugin not found: {}", plugin_path);
+                    }
+                }
+                Action::Debate(_) | Action::Snapshot(_) | Action::Restore(_) | Action::Lint(_) => {
+                    // These are handled in the final pass after streaming
+                }
             }
         }
 
-        println!("\n{}", "------------------------------------------------".dimmed());
-
+        println!(
+            "\n{}",
+            "------------------------------------------------".dimmed()
+        );
 
         // Final Action Pass (for any blocks that were completed at the very end)
         let final_actions = extract_code_blocks(&response);
@@ -1660,8 +1989,12 @@ async fn main() -> Result<()> {
                     println!("{}", format!("🔍 Verifying {}...", path).dimmed());
                     match hot_check.poll_results() {
                         Ok(true) => {
-                            if let Err(e) = show_diff(&path, &content) { println!("Diff error: {}", e); }
-                            let apply = if cortex.config.autonomous_mode { true } else {
+                            if let Err(e) = show_diff(&path, &content) {
+                                println!("Diff error: {}", e);
+                            }
+                            let apply = if cortex.config.autonomous_mode {
+                                true
+                            } else {
                                 print!("Context verified. Apply change? [y/N]: ");
                                 io::stdout().flush()?;
                                 let mut confirm = String::new();
@@ -1669,62 +2002,79 @@ async fn main() -> Result<()> {
                                 confirm.trim().eq_ignore_ascii_case("y")
                             };
                             if apply {
-                                if let Err(e) = shadow.commit(&path) { println!("Commit error: {}", e); }
+                                if let Err(e) = shadow.commit(&path) {
+                                    println!("Commit error: {}", e);
+                                }
                                 println!("{}", format!("✅ Applied to {}", path).green());
                             }
-                        },
+                        }
                         Ok(false) => println!("{}", "❌ Verification Failed.".red()),
                         Err(e) => println!("Verification error: {}", e),
                     }
-                },
+                }
                 Action::ExecShell(cmd) => {
                     if cmd.contains("git push") {
-                         let _ = Tools::git_sync();
+                        let _ = Tools::git_sync();
                     } else {
-                         let res = Tools::exec_shell(&cmd, cortex.config.autonomous_mode)?;
-                         if cortex.config.autonomous_mode {
-                             last_output.push_str(&res);
-                             last_output.push('\n');
-                         }
+                        let res = Tools::exec_shell(&cmd, cortex.config.autonomous_mode)?;
+                        if cortex.config.autonomous_mode {
+                            last_output.push_str(&res);
+                            last_output.push('\n');
+                        }
                     }
-                },
+                }
                 Action::Directive(val) => {
                     if let Some(directives) = val.get("directives").and_then(|v| v.as_array()) {
-                        for d in directives { if let Some(s) = d.as_str() { last_output.push_str(&format!("Directive: {}\n", s)); } }
+                        for d in directives {
+                            if let Some(s) = d.as_str() {
+                                last_output.push_str(&format!("Directive: {}\n", s));
+                            }
+                        }
                     }
-                },
+                }
                 Action::CallMcpTool(server, tool, _args) => {
                     println!("🏁 Final Pass: MCP Tool {}/{} noted.", server, tool);
-                },
+                }
                 Action::ReadUrl(url) => {
                     println!("🏁 Final Pass: URL {} noted.", url);
-                },
+                }
                 Action::SearchWeb(query) => {
                     println!("🏁 Final Pass: Search '{}' noted.", query);
-                },
+                }
                 Action::CaptureUI(desc) => {
-                    println!("🏁 Final Pass: Capture '{}' noted.", desc.unwrap_or_default());
-                },
+                    println!(
+                        "🏁 Final Pass: Capture '{}' noted.",
+                        desc.unwrap_or_default()
+                    );
+                }
                 Action::CallWasm(func, _args) => {
                     println!("🏁 Final Pass: WASM Tool '{}' noted.", func);
-                },
+                }
                 Action::Debate(topic) => {
-                     println!("🏁 Final Pass: Debate '{}' noted.", topic);
-                },
+                    println!("🏁 Final Pass: Debate '{}' noted.", topic);
+                }
                 Action::Snapshot(label) => {
-                    let replicator = replicator::Replicator::new().unwrap();
-                    match replicator.create_snapshot(&label) {
-                        Ok(id) => println!("✅ Snapshot created: {}", id.green()),
-                        Err(e) => println!("❌ Snapshot failed: {}", e),
+                    match replicator::Replicator::new() {
+                        Ok(replicator) => {
+                            match replicator.create_snapshot(&label) {
+                                Ok(id) => println!("✅ Snapshot created: {}", id.green()),
+                                Err(e) => println!("❌ Snapshot failed: {}", e),
+                            }
+                        }
+                        Err(e) => println!("❌ Failed to initialize replicator: {}", e),
                     }
-                },
+                }
                 Action::Restore(id) => {
-                    let replicator = replicator::Replicator::new().unwrap();
-                    match replicator.restore_snapshot(&id) {
-                        Ok(_) => println!("✅ System restored to {}", id.green()),
-                        Err(e) => println!("❌ Restore failed: {}", e),
+                    match replicator::Replicator::new() {
+                        Ok(replicator) => {
+                            match replicator.restore_snapshot(&id) {
+                                Ok(_) => println!("✅ System restored to {}", id.green()),
+                                Err(e) => println!("❌ Restore failed: {}", e),
+                            }
+                        }
+                        Err(e) => println!("❌ Failed to initialize replicator for restore: {}", e),
                     }
-                },
+                }
                 Action::Lint(path) => {
                     if let Ok(violations) = cortex.perform_lint(&path).await {
                         if violations.is_empty() {
@@ -1742,40 +2092,63 @@ async fn main() -> Result<()> {
                                     println!("    👉 {}", sugg.dimmed());
                                 }
                             }
-                            
+
                             // Auto-save violations to memory context for next turn
-                            let report = format!("Linting report for {}: Found {} issues.", path, violations.len());
+                            let report = format!(
+                                "Linting report for {}: Found {} issues.",
+                                path,
+                                violations.len()
+                            );
                             let _ = memory.store_lesson(&report).await;
                         }
                     }
-                },
-                _ => {} // Handle remaining actions or new variants
+                }
             }
         }
-        
+
         // Handle Debates triggered during streaming or final pass
         // We do this after the loop to avoid nesting async calls in the loop
-        let debate_actions: Vec<_> = actions.iter().filter_map(|a| if let Action::Debate(t) = a { Some(t.clone()) } else { None }).collect();
+        let debate_actions: Vec<_> = actions
+            .iter()
+            .filter_map(|a| {
+                if let Action::Debate(t) = a {
+                    Some(t.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
         for topic in debate_actions {
             if let Ok(synthesis) = cortex.conduct_debate(&topic, &input).await {
                 println!("\n📜 {}", "DEBATE VERDICT:".yellow().bold());
                 println!("SUMMARY: {}", synthesis.summary);
                 println!("RECOMMENDATION: {}", synthesis.final_recommendation.bold());
-                
+
                 if !synthesis.action_items.is_empty() {
                     println!("\nREQUIRED ACTIONS:");
                     for item in synthesis.action_items {
-                        println!("  [{}] {}", if item.priority == 1 { "CRITICAL".red() } else { "SUGGESTED".cyan() }, item.description);
+                        println!(
+                            "  [{}] {}",
+                            if item.priority == 1 {
+                                "CRITICAL".red()
+                            } else {
+                                "SUGGESTED".cyan()
+                            },
+                            item.description
+                        );
                     }
                 }
 
                 // If critical, we might want to feed this back into memory or stop execution.
                 // For now, we store it as a lesson.
-                let lesson = format!("DEBATE DECISION on '{}': {}", topic, synthesis.final_recommendation);
+                let lesson = format!(
+                    "DEBATE DECISION on '{}': {}",
+                    topic, synthesis.final_recommendation
+                );
                 let _ = memory.store_lesson(&lesson).await;
             }
         }
-        
+
         if response.to_lowercase().contains("task is complete") || response.contains("[x]") {
             Tools::update_tasks_md()?;
         }
@@ -1783,11 +2156,17 @@ async fn main() -> Result<()> {
         // Janitor Extraction (Autonomous Learning)
         if cortex.config.autonomous_mode {
             let history = format!("User: {}\nRalph: {}", input, response);
-            let janitor_prompt = format!("{}\n\nCONVERSATION:\n{}", Janitor::extraction_prompt(), history);
+            let janitor_prompt = format!(
+                "{}\n\nCONVERSATION:\n{}",
+                Janitor::extraction_prompt(),
+                history
+            );
             if let Ok(mut stream) = cortex.stream_generate(&janitor_prompt, None, None).await {
                 let mut extraction = String::new();
                 while let Some(chunk) = stream.next().await {
-                    if let Ok(token) = chunk { extraction.push_str(&token); }
+                    if let Ok(token) = chunk {
+                        extraction.push_str(&token);
+                    }
                 }
                 let triples = Janitor::parse_triples(&extraction);
                 for triple in triples {
@@ -1803,11 +2182,17 @@ async fn main() -> Result<()> {
         // Reflexion Pass (Self-Critique and Heuristic Learning)
         if cortex.config.autonomous_mode {
             let history = format!("User: {}\nRalph: {}", input, response);
-            let reflexion_prompt = format!("{}\n\nCONVERSATION:\n{}", reflexion::Reflexion::critique_prompt(), history);
+            let reflexion_prompt = format!(
+                "{}\n\nCONVERSATION:\n{}",
+                reflexion::Reflexion::critique_prompt(),
+                history
+            );
             if let Ok(mut stream) = cortex.stream_generate(&reflexion_prompt, None, None).await {
                 let mut extraction = String::new();
                 while let Some(chunk) = stream.next().await {
-                    if let Ok(token) = chunk { extraction.push_str(&token); }
+                    if let Ok(token) = chunk {
+                        extraction.push_str(&token);
+                    }
                 }
                 let heuristics = reflexion::Reflexion::parse_heuristics(&extraction);
                 for heuristic in heuristics {
@@ -1819,7 +2204,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        
+
         if cortex.config.autonomous_mode {
             sleep(Duration::from_secs(2)).await;
         }

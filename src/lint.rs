@@ -49,7 +49,7 @@ Example:
   {{
     "file": "src/main.rs",
     "line": 42,
-    "severity": "Critical", 
+    "severity": "Critical",
     "message": "Potential deadlock here due to lock ordering.",
     "suggestion": "Acquire lock A before lock B."
   }}
@@ -64,28 +64,21 @@ Example:
         // Extract JSON from code blocks if present
         let json_str = if let Some(start) = response.find("```json") {
             if let Some(end) = response[start..].find("```") {
-                 let s = &response[start..][..end];
-                 s.trim_start_matches("```json").trim()
+                let s = &response[start..][..end];
+                s.trim_start_matches("```json").trim()
             } else {
                 response
             }
         } else if let Some(start) = response.find('[') {
-             if let Some(end) = response.rfind(']') {
-                 &response[start..=end]
-             } else {
-                 response
-             }
+            if let Some(end) = response.rfind(']') {
+                &response[start..=end]
+            } else {
+                response
+            }
         } else {
             response
         };
 
-        match serde_json::from_str::<Vec<LintViolation>>(json_str) {
-            Ok(violations) => violations,
-            Err(_) => {
-                // If direct JSON parsing fails, return generic error or empty
-                // In a robust system, we might try to extract manually
-                Vec::new()
-            }
-        }
+        serde_json::from_str::<Vec<LintViolation>>(json_str).unwrap_or_default()
     }
 }

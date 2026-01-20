@@ -3,14 +3,13 @@
 //! Runs Ralph as a background service, watching for file changes
 //! and automatically triggering actions like generating PRs or filing issues.
 
-use anyhow::{Context, Result};
-use notify::{Watcher, RecommendedWatcher, RecursiveMode, Event, EventKind};
+use anyhow::Result;
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
-use serde::{Deserialize, Serialize};
 
 /// Events that the daemon can respond to
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +63,7 @@ impl Default for DaemonConfig {
     }
 }
 
+#[allow(dead_code)]
 /// File watcher for the daemon
 pub struct FileWatcher {
     _watcher: RecommendedWatcher,
@@ -74,7 +74,7 @@ impl FileWatcher {
     /// Create a new file watcher for the given paths
     pub fn new(paths: &[PathBuf]) -> Result<Self> {
         let (tx, rx) = channel();
-        
+
         let mut watcher = notify::recommended_watcher(move |res| {
             let _ = tx.send(res);
         })?;
@@ -99,9 +99,10 @@ impl FileWatcher {
         }
     }
 
+    #[allow(dead_code)]
     fn convert_event(&self, event: Event) -> Option<DaemonEvent> {
         let path = event.paths.first()?.clone();
-        
+
         match event.kind {
             EventKind::Create(_) => {
                 if path.is_dir() {
@@ -126,10 +127,11 @@ pub struct Daemon {
 }
 
 impl Daemon {
+    #[allow(dead_code)]
     pub fn new(config: DaemonConfig) -> Self {
         let (event_tx, _) = broadcast::channel(100);
         let (action_tx, _) = broadcast::channel(100);
-        
+
         Self {
             config,
             watcher: None,
@@ -138,17 +140,20 @@ impl Daemon {
         }
     }
 
+    #[allow(dead_code)]
     /// Start the daemon
     pub fn start(&mut self) -> Result<()> {
         self.watcher = Some(FileWatcher::new(&self.config.watch_paths)?);
         Ok(())
     }
 
+    #[allow(dead_code)]
     /// Subscribe to daemon events
     pub fn subscribe_events(&self) -> broadcast::Receiver<DaemonEvent> {
         self.event_tx.subscribe()
     }
 
+    #[allow(dead_code)]
     /// Subscribe to daemon actions
     pub fn subscribe_actions(&self) -> broadcast::Receiver<DaemonAction> {
         self.action_tx.subscribe()
@@ -162,8 +167,7 @@ impl Daemon {
             if pattern.ends_with("/*") {
                 let prefix = &pattern[..pattern.len() - 2];
                 path_str.contains(prefix)
-            } else if pattern.starts_with("*.") {
-                let ext = &pattern[2..];
+            } else if let Some(ext) = pattern.strip_prefix("*.") {
                 path_str.ends_with(ext)
             } else {
                 path_str.contains(pattern)
@@ -182,7 +186,7 @@ impl Daemon {
                 }
 
                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                
+
                 // Source file changes
                 if matches!(ext, "rs" | "ts" | "js" | "py" | "go") {
                     if self.config.auto_check {
@@ -203,7 +207,10 @@ impl Daemon {
                         branch: format!("ralph/{}", task.to_lowercase().replace(' ', "-")),
                     });
                 }
-                actions.push(DaemonAction::NotifyUser(format!("Task completed: {}", task)));
+                actions.push(DaemonAction::NotifyUser(format!(
+                    "Task completed: {}",
+                    task
+                )));
             }
             DaemonEvent::ErrorOccurred(err) => {
                 actions.push(DaemonAction::NotifyUser(format!("Error: {}", err)));
@@ -214,30 +221,33 @@ impl Daemon {
         actions
     }
 
+    #[allow(dead_code)]
     /// Run the daemon loop (blocking)
     pub async fn run(&mut self) -> Result<()> {
         self.start()?;
-        
+
         loop {
             if let Some(ref watcher) = self.watcher {
                 if let Some(event) = watcher.next_event() {
                     let _ = self.event_tx.send(event.clone());
-                    
+
                     let actions = self.process_event(&event);
                     for action in actions {
                         let _ = self.action_tx.send(action);
                     }
                 }
             }
-            
+
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 }
 
+#[allow(dead_code)]
 /// LaunchAgent plist generator for macOS
 pub fn generate_launchd_plist(binary_path: &str, workspace: &str) -> String {
-    format!(r#"<?xml version="1.0" encoding="UTF-8"?>
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -261,5 +271,7 @@ pub fn generate_launchd_plist(binary_path: &str, workspace: &str) -> String {
     <key>WorkingDirectory</key>
     <string>{}</string>
 </dict>
-</plist>"#, binary_path, workspace, workspace)
+</plist>"#,
+        binary_path, workspace, workspace
+    )
 }

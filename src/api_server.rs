@@ -5,7 +5,10 @@
 
 use anyhow::Result;
 use axum::{
-    extract::{State, WebSocketUpgrade, ws::{Message, WebSocket}},
+    extract::{
+        ws::{Message, WebSocket},
+        State, WebSocketUpgrade,
+    },
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -15,6 +18,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 
+#[allow(dead_code)]
 /// API Server state
 pub struct ApiState {
     pub workspace: String,
@@ -23,6 +27,7 @@ pub struct ApiState {
 }
 
 impl ApiState {
+    #[allow(dead_code)]
     pub fn new(workspace: String) -> Self {
         Self {
             workspace,
@@ -32,10 +37,12 @@ impl ApiState {
     }
 }
 
+#[allow(dead_code)]
 pub type SharedState = Arc<RwLock<ApiState>>;
 
 // --- Request/Response Types ---
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct AskRequest {
     pub question: String,
@@ -45,6 +52,7 @@ pub struct AskRequest {
     pub max_tokens: Option<usize>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct AskResponse {
     pub answer: String,
@@ -52,6 +60,7 @@ pub struct AskResponse {
     pub confidence: f32,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct SourceReference {
     pub file: String,
@@ -60,12 +69,14 @@ pub struct SourceReference {
     pub snippet: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct ExecuteRequest {
     pub action: String,
     pub params: serde_json::Value,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct ExecuteResponse {
     pub success: bool,
@@ -73,6 +84,7 @@ pub struct ExecuteResponse {
     pub error: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct StatusResponse {
     pub status: String,
@@ -83,6 +95,7 @@ pub struct StatusResponse {
     pub active_workers: usize,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct SearchRequest {
     pub query: String,
@@ -92,7 +105,9 @@ pub struct SearchRequest {
     pub file_types: Option<Vec<String>>,
 }
 
-fn default_limit() -> usize { 10 }
+fn default_limit() -> usize {
+    10
+}
 
 #[derive(Debug, Serialize)]
 pub struct SearchResponse {
@@ -121,7 +136,12 @@ async fn health_check() -> impl IntoResponse {
 async fn get_status(State(state): State<SharedState>) -> impl IntoResponse {
     let state = state.read().await;
     Json(StatusResponse {
-        status: if state.is_processing { "processing" } else { "idle" }.to_string(),
+        status: if state.is_processing {
+            "processing"
+        } else {
+            "idle"
+        }
+        .to_string(),
         workspace: state.workspace.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         uptime_seconds: 0, // Would track actual uptime
@@ -251,7 +271,8 @@ async fn handle_websocket(mut socket: WebSocket, _state: SharedState) {
     let welcome_msg = serde_json::to_string(&serde_json::json!({
         "type": "connected",
         "message": "Ralph-Nano WebSocket API"
-    })).unwrap();
+    }))
+    .unwrap();
     let _ = socket.send(Message::Text(welcome_msg.into())).await;
 
     // Handle incoming messages
@@ -260,7 +281,7 @@ async fn handle_websocket(mut socket: WebSocket, _state: SharedState) {
             // Parse message as JSON command
             if let Ok(cmd) = serde_json::from_str::<serde_json::Value>(&text) {
                 let cmd_type = cmd["type"].as_str().unwrap_or("");
-                
+
                 let response = match cmd_type {
                     "ask" => {
                         let question = cmd["question"].as_str().unwrap_or("");
@@ -293,6 +314,7 @@ async fn handle_websocket(mut socket: WebSocket, _state: SharedState) {
     }
 }
 
+#[allow(dead_code)]
 /// Build the API router
 pub fn build_router(state: SharedState) -> Router {
     let cors = CorsLayer::new()
@@ -311,14 +333,18 @@ pub fn build_router(state: SharedState) -> Router {
         .with_state(state)
 }
 
+#[allow(dead_code)]
 /// Start the API server
 pub async fn start_server(workspace: String, port: u16) -> Result<()> {
     let state = Arc::new(RwLock::new(ApiState::new(workspace)));
     let app = build_router(state);
-    
+
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
-    println!("🌐 Ralph-Nano API server listening on http://127.0.0.1:{}", port);
-    
+    println!(
+        "🌐 Ralph-Nano API server listening on http://127.0.0.1:{}",
+        port
+    );
+
     axum::serve(listener, app).await?;
     Ok(())
 }

@@ -4,7 +4,7 @@
 //! in local files, and tracks regressions over time.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -17,13 +17,14 @@ pub struct BenchmarkResult {
     pub name: String,
     pub duration_ns: u64,
     pub iterations: u64,
-    pub throughput: Option<f64>,  // ops/sec or bytes/sec
+    pub throughput: Option<f64>, // ops/sec or bytes/sec
     pub memory_bytes: Option<u64>,
     pub timestamp: String,
     pub commit_hash: String,
     pub tags: Vec<String>,
 }
 
+#[allow(dead_code)]
 /// Aggregated benchmark statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkStats {
@@ -35,6 +36,7 @@ pub struct BenchmarkStats {
     pub samples: usize,
 }
 
+#[allow(dead_code)]
 /// Comparison between two benchmark runs
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkComparison {
@@ -43,9 +45,10 @@ pub struct BenchmarkComparison {
     pub current_ns: f64,
     pub change_percent: f64,
     pub regression: bool,
-    pub significant: bool,  // > 5% change
+    pub significant: bool, // > 5% change
 }
 
+#[allow(dead_code)]
 /// Benchmark suite definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkSuite {
@@ -55,15 +58,17 @@ pub struct BenchmarkSuite {
     pub parser: BenchmarkParser,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum BenchmarkParser {
-    Criterion,    // Rust criterion output
-    Hyperfine,    // Generic command timing
-    Custom,       // Custom format
-    Jest,         // JavaScript jest benchmarks
-    Pytest,       // Python pytest-benchmark
+    Criterion, // Rust criterion output
+    Hyperfine, // Generic command timing
+    Custom,    // Custom format
+    Jest,      // JavaScript jest benchmarks
+    Pytest,    // Python pytest-benchmark
 }
 
+#[allow(dead_code)]
 /// The benchmark runner and tracker
 pub struct Benchmarker {
     workspace: String,
@@ -72,10 +77,11 @@ pub struct Benchmarker {
 }
 
 impl Benchmarker {
+    #[allow(dead_code)]
     pub fn new(workspace: &str) -> Self {
         let results_dir = format!("{}/.ralph/benchmarks", workspace);
         std::fs::create_dir_all(&results_dir).ok();
-        
+
         Self {
             workspace: workspace.to_string(),
             results_dir,
@@ -83,6 +89,7 @@ impl Benchmarker {
         }
     }
 
+    #[allow(dead_code)]
     /// Detect available benchmark suites based on project type
     pub fn detect_suites(&self) -> Vec<BenchmarkSuite> {
         let mut suites = Vec::new();
@@ -109,7 +116,8 @@ impl Benchmarker {
 
         // JavaScript: Check for benchmark scripts
         if Path::new(&format!("{}/package.json", self.workspace)).exists() {
-            if let Ok(content) = std::fs::read_to_string(format!("{}/package.json", self.workspace)) {
+            if let Ok(content) = std::fs::read_to_string(format!("{}/package.json", self.workspace))
+            {
                 if content.contains("\"bench\"") || content.contains("\"benchmark\"") {
                     suites.push(BenchmarkSuite {
                         name: "Node Benchmarks".to_string(),
@@ -122,8 +130,9 @@ impl Benchmarker {
         }
 
         // Python: Check for pytest-benchmark
-        if Path::new(&format!("{}/pytest.ini", self.workspace)).exists() ||
-           Path::new(&format!("{}/pyproject.toml", self.workspace)).exists() {
+        if Path::new(&format!("{}/pytest.ini", self.workspace)).exists()
+            || Path::new(&format!("{}/pyproject.toml", self.workspace)).exists()
+        {
             suites.push(BenchmarkSuite {
                 name: "Python Benchmarks".to_string(),
                 benchmarks: vec![],
@@ -135,6 +144,7 @@ impl Benchmarker {
         suites
     }
 
+    #[allow(dead_code)]
     /// Run a benchmark suite
     pub fn run_suite(&mut self, suite: &BenchmarkSuite) -> Result<Vec<BenchmarkResult>> {
         let output = Command::new("sh")
@@ -146,10 +156,10 @@ impl Benchmarker {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let results = self.parse_output(&stdout, suite.parser)?;
-        
+
         // Add to history
         self.history.extend(results.clone());
-        
+
         Ok(results)
     }
 
@@ -165,18 +175,23 @@ impl Benchmarker {
         }
     }
 
-    fn parse_criterion(&self, output: &str, commit: &str, timestamp: &str) -> Result<Vec<BenchmarkResult>> {
+    fn parse_criterion(
+        &self,
+        output: &str,
+        commit: &str,
+        timestamp: &str,
+    ) -> Result<Vec<BenchmarkResult>> {
         let mut results = Vec::new();
-        
+
         // Parse criterion output format
         // Example: "test benchmark_name ... bench:     123,456 ns/iter (+/- 1,234)"
         let re = regex::Regex::new(r"(?m)^(.+?)\s+time:\s+\[([0-9.]+)\s+(\w+)")?;
-        
+
         for cap in re.captures_iter(output) {
             let name = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
             let time_str = cap.get(2).map(|m| m.as_str()).unwrap_or("0");
             let unit = cap.get(3).map(|m| m.as_str()).unwrap_or("ns");
-            
+
             let time: f64 = time_str.replace(',', "").parse().unwrap_or(0.0);
             let duration_ns = match unit {
                 "ps" => (time / 1000.0) as u64,
@@ -202,17 +217,22 @@ impl Benchmarker {
         Ok(results)
     }
 
-    fn parse_hyperfine(&self, output: &str, commit: &str, timestamp: &str) -> Result<Vec<BenchmarkResult>> {
+    fn parse_hyperfine(
+        &self,
+        output: &str,
+        commit: &str,
+        timestamp: &str,
+    ) -> Result<Vec<BenchmarkResult>> {
         let mut results = Vec::new();
-        
+
         // Parse hyperfine JSON output or summary
         // Example: "Benchmark 1: command  Time (mean ± σ):     123.4 ms ±   5.6 ms"
         let re = regex::Regex::new(r"Time \(mean.*?\):\s+([0-9.]+)\s+(\w+)")?;
-        
+
         for cap in re.captures_iter(output) {
             let time_str = cap.get(1).map(|m| m.as_str()).unwrap_or("0");
             let unit = cap.get(2).map(|m| m.as_str()).unwrap_or("ms");
-            
+
             let time: f64 = time_str.parse().unwrap_or(0.0);
             let duration_ns = match unit {
                 "ns" => time as u64,
@@ -242,20 +262,23 @@ impl Benchmarker {
             .args(["rev-parse", "--short", "HEAD"])
             .current_dir(&self.workspace)
             .output()?;
-        
+
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
+    #[allow(dead_code)]
     /// Compare current results with baseline
     pub fn compare_with_baseline(&self, baseline_commit: &str) -> Vec<BenchmarkComparison> {
-        let baseline: HashMap<String, f64> = self.history
+        let baseline: HashMap<String, f64> = self
+            .history
             .iter()
             .filter(|r| r.commit_hash == baseline_commit)
             .map(|r| (r.name.clone(), r.duration_ns as f64))
             .collect();
 
         let current_commit = self.get_current_commit().unwrap_or_default();
-        let current: HashMap<String, f64> = self.history
+        let current: HashMap<String, f64> = self
+            .history
             .iter()
             .filter(|r| r.commit_hash == current_commit)
             .map(|r| (r.name.clone(), r.duration_ns as f64))
@@ -279,21 +302,25 @@ impl Benchmarker {
         comparisons
     }
 
+    #[allow(dead_code)]
     /// Generate a benchmark report
     pub fn generate_report(&self) -> String {
         let mut report = String::from("# Benchmark Report\n\n");
-        
+
         // Group by commit
         let mut by_commit: HashMap<String, Vec<&BenchmarkResult>> = HashMap::new();
         for result in &self.history {
-            by_commit.entry(result.commit_hash.clone()).or_default().push(result);
+            by_commit
+                .entry(result.commit_hash.clone())
+                .or_default()
+                .push(result);
         }
 
         for (commit, results) in by_commit.iter().take(5) {
             report.push_str(&format!("## Commit: {}\n\n", commit));
             report.push_str("| Benchmark | Duration | Throughput |\n");
             report.push_str("|-----------|----------|------------|\n");
-            
+
             for r in results {
                 let duration = if r.duration_ns > 1_000_000_000 {
                     format!("{:.2}s", r.duration_ns as f64 / 1_000_000_000.0)
@@ -304,11 +331,12 @@ impl Benchmarker {
                 } else {
                     format!("{}ns", r.duration_ns)
                 };
-                
-                let throughput = r.throughput
+
+                let throughput = r
+                    .throughput
                     .map(|t| format!("{:.2} ops/s", t))
                     .unwrap_or_else(|| "-".to_string());
-                    
+
                 report.push_str(&format!("| {} | {} | {} |\n", r.name, duration, throughput));
             }
             report.push('\n');
@@ -317,6 +345,7 @@ impl Benchmarker {
         report
     }
 
+    #[allow(dead_code)]
     /// Save results to disk
     pub fn save_results(&self) -> Result<()> {
         let path = format!("{}/history.json", self.results_dir);
@@ -325,6 +354,7 @@ impl Benchmarker {
         Ok(())
     }
 
+    #[allow(dead_code)]
     /// Load results from disk
     pub fn load_results(&mut self) -> Result<()> {
         let path = format!("{}/history.json", self.results_dir);
@@ -336,6 +366,7 @@ impl Benchmarker {
     }
 }
 
+#[allow(dead_code)]
 /// Quick timing utility for inline benchmarks
 pub fn time_block<F, T>(name: &str, f: F) -> (T, Duration)
 where

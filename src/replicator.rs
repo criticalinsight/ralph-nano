@@ -4,41 +4,58 @@
 //! dependencies, and start autonomous work without human intervention.
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use serde::{Deserialize, Serialize};
 
 const RALPH_DIR: &str = ".ralph";
 
-/// Configuration for a new Ralph instance
+/// Configuration for a new Ralph instance in a separate workspace
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplicaConfig {
+    /// Absolute path to the new workspace directory
     pub workspace: PathBuf,
+    /// The primary task assigned to the new replica
     pub task: String,
+    /// ID of the parent replica that spawned this instance
     pub parent_id: String,
+    /// Whether to inherit the parent's memory graph
     pub inherit_memory: bool,
+    /// Whether to inherit learned heuristics
     pub inherit_heuristics: bool,
+    /// Maximum number of autonomous loops before stopping
     pub max_loops: usize,
+    /// Whether to run in autonomous mode (self-correcting)
     pub autonomous: bool,
 }
 
-/// Status of a replica
+/// Status of a replica throughout its lifecycle
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ReplicaStatus {
+    /// Setting up the workspace and configuration
     Initializing,
+    /// Installing dependencies and verifying environment
     ConfiguringDependencies,
+    /// Active and executing the assigned task
     Running,
+    /// Sucessfully completed the task
     Completed,
+    /// Encountered a terminal error
     Failed(String),
 }
 
-/// A self-replicating agent instance
+/// A handle to a self-replicating agent instance
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Replica {
+    /// Unique identifier for this replica
     pub id: String,
+    /// The configuration used to create this replica
     pub config: ReplicaConfig,
+    /// Current execution status
     pub status: ReplicaStatus,
+    /// Process ID if the replica is currently running
     pub pid: Option<u32>,
+    /// Path to the replica's execution log
     pub log_path: PathBuf,
 }
 
@@ -51,9 +68,9 @@ pub struct Replicator {
 impl Replicator {
     pub fn new() -> Result<Self> {
         // Find the ralph-nano binary
-        let ralph_binary = std::env::current_exe()
-            .context("Failed to get current executable path")?;
-        
+        let ralph_binary =
+            std::env::current_exe().context("Failed to get current executable path")?;
+
         let global_memory_path = dirs::home_dir()
             .map(|h| h.join(".ralph/global_graph"))
             .unwrap_or_else(|| PathBuf::from(".ralph/global_graph"));
@@ -65,6 +82,7 @@ impl Replicator {
     }
 
     /// Clone Ralph into a new workspace
+    #[allow(dead_code)]
     pub fn replicate(&self, config: ReplicaConfig) -> Result<Replica> {
         let id = uuid::Uuid::new_v4().to_string();
         let log_path = config.workspace.join(".ralph/replica.log");
@@ -115,6 +133,7 @@ impl Replicator {
     }
 
     /// Initialize a workspace with Ralph structure
+    #[allow(dead_code)]
     fn init_workspace(&self, config: &ReplicaConfig) -> Result<()> {
         let ws = &config.workspace;
 
@@ -122,7 +141,8 @@ impl Replicator {
         std::fs::create_dir_all(ws.join(".ralph"))?;
 
         // Create Ralph.toml config
-        let ralph_toml = format!(r#"# Ralph-Nano Configuration
+        let ralph_toml = format!(
+            r#"# Ralph-Nano Configuration
 max_loops = {}
 autonomous = {}
 parent_id = "{}"
@@ -133,11 +153,8 @@ fallback = "gemini-2.5-flash"
 
 [memory]
 inherit_global = {}
-"#, 
-            config.max_loops,
-            config.autonomous,
-            config.parent_id,
-            config.inherit_memory
+"#,
+            config.max_loops, config.autonomous, config.parent_id, config.inherit_memory
         );
         std::fs::write(ws.join("Ralph.toml"), ralph_toml)?;
 
@@ -145,24 +162,28 @@ inherit_global = {}
     }
 
     /// Copy global memory to new workspace
+    #[allow(dead_code)]
     fn copy_global_memory(&self, workspace: &Path) -> Result<()> {
         let target = workspace.join(".ralph/memory");
-        
+
         if self.global_memory_path.exists() {
             // Copy CozoDB files
             fs_extra::dir::copy(
                 &self.global_memory_path,
                 &target,
-                &fs_extra::dir::CopyOptions::new()
-            ).ok(); // Ignore errors - memory is optional
+                &fs_extra::dir::CopyOptions::new(),
+            )
+            .ok(); // Ignore errors - memory is optional
         }
 
         Ok(())
     }
 
     /// Create initial TASKS.md file
+    #[allow(dead_code)]
     fn create_tasks_file(&self, config: &ReplicaConfig) -> Result<()> {
-        let tasks_content = format!(r#"# {} 
+        let tasks_content = format!(
+            r#"# {}
 
 ## Objective
 {}
@@ -180,11 +201,7 @@ inherit_global = {}
 - Autonomous mode: {}
 - Max loops: {}
 "#,
-            config.task,
-            config.task,
-            config.parent_id,
-            config.autonomous,
-            config.max_loops
+            config.task, config.task, config.parent_id, config.autonomous, config.max_loops
         );
 
         std::fs::write(config.workspace.join("TASKS.md"), tasks_content)?;
@@ -192,6 +209,7 @@ inherit_global = {}
     }
 
     /// Check the status of a replica
+    #[allow(dead_code)]
     pub fn check_status(&self, workspace: &Path) -> Result<Replica> {
         let state_path = workspace.join(".ralph/replica_state.json");
         let content = std::fs::read_to_string(state_path)?;
@@ -200,10 +218,11 @@ inherit_global = {}
     }
 
     /// List all active replicas
+    #[allow(dead_code)]
     pub fn list_replicas(&self) -> Result<Vec<Replica>> {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let replicas_dir = home.join(".ralph/replicas");
-        
+
         let mut replicas = Vec::new();
         if replicas_dir.exists() {
             for entry in std::fs::read_dir(replicas_dir)? {
@@ -218,15 +237,16 @@ inherit_global = {}
                 }
             }
         }
-        
+
         Ok(replicas)
     }
 
     /// Spawn a replica for a specific subtask
+    #[allow(dead_code)]
     pub fn spawn_subtask(&self, parent_workspace: &Path, subtask: &str) -> Result<Replica> {
         let parent_id = parent_workspace.to_string_lossy().to_string();
         let subtask_name = subtask.replace(' ', "_").to_lowercase();
-        
+
         let workspace = parent_workspace
             .parent()
             .unwrap_or(parent_workspace)
@@ -246,10 +266,15 @@ inherit_global = {}
     }
 
     /// Clone from a git repository
+    #[allow(dead_code)]
     pub fn clone_and_replicate(&self, repo_url: &str, task: &str) -> Result<Replica> {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let workspace = home.join(".ralph/clones").join(
-            repo_url.split('/').last().unwrap_or("repo").replace(".git", "")
+            repo_url
+                .split('/')
+                .next_back()
+                .unwrap_or("repo")
+                .replace(".git", ""),
         );
 
         // Clone the repository
@@ -279,23 +304,31 @@ inherit_global = {}
         let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
         let snapshot_id = format!("{}_{}", timestamp, label.replace(' ', "_"));
         let snapshot_dir = Path::new(RALPH_DIR).join("snapshots").join(&snapshot_id);
-        
+
         std::fs::create_dir_all(&snapshot_dir)?;
-        
+
         // 1. Copy Critical Files
-        let critical_files = vec!["Cargo.toml", "package.json", "TASKS.md", "README.md", "PRD.md"];
+        let critical_files = vec![
+            "Cargo.toml",
+            "package.json",
+            "TASKS.md",
+            "README.md",
+            "PRD.md",
+        ];
         for file in critical_files {
             if Path::new(file).exists() {
                 std::fs::copy(file, snapshot_dir.join(file))?;
             }
         }
-        
+
         // 2. Snapshot Source Code (src/)
         if Path::new("src").exists() {
-            let options = fs_extra::dir::CopyOptions::new().overwrite(true).content_only(false);
+            let options = fs_extra::dir::CopyOptions::new()
+                .overwrite(true)
+                .content_only(false);
             fs_extra::dir::copy("src", &snapshot_dir, &options)?;
         }
-        
+
         println!("📸 Snapshot created: {}", snapshot_id);
         Ok(snapshot_id)
     }
@@ -308,26 +341,34 @@ inherit_global = {}
         }
 
         println!("⏪ Restoring snapshot: {}...", snapshot_id);
-        
+
         // 1. Restore Files
-        let options = fs_extra::dir::CopyOptions::new().overwrite(true).content_only(true);
+        let _options = fs_extra::dir::CopyOptions::new()
+            .overwrite(true)
+            .content_only(true);
         for entry in std::fs::read_dir(&snapshot_dir)? {
             let entry = entry?;
             let path = entry.path();
             let file_name = path.file_name().unwrap();
-            
+
             if path.is_dir() {
                 // recursively copy directories (like src/)
                 if file_name == "src" {
                     // Remove current src to ensure clean state
-                     if Path::new("src").exists() { std::fs::remove_dir_all("src")?; }
-                     fs_extra::dir::copy(&path, ".", &fs_extra::dir::CopyOptions::new().overwrite(true))?;
+                    if Path::new("src").exists() {
+                        std::fs::remove_dir_all("src")?;
+                    }
+                    fs_extra::dir::copy(
+                        &path,
+                        ".",
+                        &fs_extra::dir::CopyOptions::new().overwrite(true),
+                    )?;
                 }
             } else {
                 std::fs::copy(&path, Path::new(".").join(file_name))?;
             }
         }
-        
+
         println!("✅ Restoration complete.");
         Ok(())
     }

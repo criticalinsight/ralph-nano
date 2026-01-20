@@ -1,12 +1,12 @@
 // src/swarm.rs - Worker Swarm Orchestration for Ralph-Nano v1.0.0
 
 use anyhow::{Context, Result};
-use std::process::{Child, Command, Stdio};
-use std::path::Path;
-use std::fs;
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
 
 const RALPH_DIR: &str = ".ralph";
 
@@ -17,6 +17,7 @@ pub struct WorkerStatus {
     pub current_task: Option<String>,
     pub assigned_task: Option<String>,
     pub completed_tasks: usize,
+    #[allow(dead_code)]
     pub subtasks_completed: Vec<String>,
 }
 
@@ -38,7 +39,7 @@ impl SwarmWorker {
     fn spawn(id: &str, workspace: &Path) -> Result<Self> {
         let worker_dir = Path::new(RALPH_DIR).join("swarm").join(id);
         fs::create_dir_all(&worker_dir)?;
-        
+
         // Initialize status file
         let status = WorkerStatus {
             id: id.to_string(),
@@ -48,8 +49,11 @@ impl SwarmWorker {
             completed_tasks: 0,
             subtasks_completed: Vec::new(),
         };
-        fs::write(worker_dir.join("status.json"), serde_json::to_string_pretty(&status)?)?;
-        
+        fs::write(
+            worker_dir.join("status.json"),
+            serde_json::to_string_pretty(&status)?,
+        )?;
+
         // Spawn the worker process
         let child = Command::new("cargo")
             .args(["run", "--", "--worker-mode"])
@@ -59,20 +63,25 @@ impl SwarmWorker {
             .stderr(Stdio::piped())
             .spawn()
             .context(format!("Failed to spawn worker {}", id))?;
-        
+
         Ok(Self {
             id: id.to_string(),
             process: child,
         })
     }
 
+    #[allow(dead_code)]
     pub fn assign_task(&self, task: &str) -> Result<()> {
         let worker_dir = Path::new(RALPH_DIR).join("swarm").join(&self.id);
         let task_file = worker_dir.join("task.json");
-        fs::write(task_file, serde_json::to_string(&json!({ "objective": task }))?)?;
+        fs::write(
+            task_file,
+            serde_json::to_string(&json!({ "objective": task }))?,
+        )?;
         Ok(())
     }
-    
+
+    #[allow(dead_code)]
     fn is_running(&mut self) -> bool {
         match self.process.try_wait() {
             Ok(Some(_)) => false,
@@ -80,7 +89,7 @@ impl SwarmWorker {
             Err(_) => false,
         }
     }
-    
+
     fn kill(&mut self) -> Result<()> {
         self.process.kill().context("Failed to kill worker")?;
         Ok(())
@@ -99,14 +108,14 @@ impl SwarmManager {
             workspace: workspace.to_path_buf(),
         }
     }
-    
+
     pub fn spawn_workers(&mut self, count: usize) -> Result<()> {
         for i in 0..count {
             let id = format!("worker-{}", i);
             if self.workers.contains_key(&id) {
                 continue;
             }
-            
+
             println!("🐝 Spawning worker: {}", id);
             let worker = SwarmWorker::spawn(&id, &self.workspace)?;
             self.workers.insert(id, worker);
@@ -114,9 +123,11 @@ impl SwarmManager {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn delegate_tasks(&mut self, tasks: Vec<String>) -> Result<()> {
         let statuses = self.poll_workers();
-        let mut idle_workers: Vec<String> = statuses.into_iter()
+        let mut idle_workers: Vec<String> = statuses
+            .into_iter()
             .filter(|s| s.state == WorkerState::Idle)
             .map(|s| s.id)
             .collect();
@@ -133,11 +144,12 @@ impl SwarmManager {
         }
         Ok(())
     }
-    
+
+    #[allow(dead_code)]
     pub fn poll_workers(&mut self) -> Vec<WorkerStatus> {
         let swarm_dir = Path::new(RALPH_DIR).join("swarm");
         let mut statuses = Vec::new();
-        
+
         for (id, worker) in &mut self.workers {
             let status_path = swarm_dir.join(id).join("status.json");
             if status_path.exists() {
@@ -147,16 +159,16 @@ impl SwarmManager {
                     }
                 }
             }
-            
+
             // Check if process is still alive
             if !worker.is_running() {
                 println!("⚠️ Worker {} has stopped.", id);
             }
         }
-        
+
         statuses
     }
-    
+
     pub fn shutdown_all(&mut self) -> Result<()> {
         println!("🛑 Shutting down all workers...");
         for (id, worker) in &mut self.workers {
@@ -166,7 +178,8 @@ impl SwarmManager {
         self.workers.clear();
         Ok(())
     }
-    
+
+    #[allow(dead_code)]
     pub fn active_count(&self) -> usize {
         self.workers.len()
     }

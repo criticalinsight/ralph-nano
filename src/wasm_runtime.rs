@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use wasmtime::*;
-use wasmtime_wasi::preview1::{WasiP1Ctx, add_to_linker_sync};
+use wasmtime_wasi::preview1::{add_to_linker_sync, WasiP1Ctx};
 use wasmtime_wasi::WasiCtxBuilder;
 
 pub struct WasmRuntime {
@@ -27,21 +27,22 @@ impl WasmRuntime {
         let wasi_ctx = WasiCtxBuilder::new()
             .inherit_stdout()
             .inherit_stderr()
-            .build_p1(); 
-            
+            .build_p1();
+
         let mut store = Store::new(&self.engine, HostState { ctx: wasi_ctx });
 
         let module = Module::from_binary(&self.engine, wasm_bytes)?;
         let instance = linker.instantiate(&mut store, &module)?;
 
-        let func = instance.get_func(&mut store, func_name)
+        let func = instance
+            .get_func(&mut store, func_name)
             .context(format!("Function {} not found", func_name))?;
-            
+
         let wasm_args: Vec<Val> = args.into_iter().map(Val::I32).collect();
         let mut results = vec![Val::I32(0)];
-        
+
         func.call(&mut store, &wasm_args, &mut results)?;
-        
+
         if let Some(Val::I32(res)) = results.first() {
             Ok(*res)
         } else {

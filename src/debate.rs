@@ -1,10 +1,9 @@
 //! Multi-Agent Debate Module
-//! 
+//!
 //! Implements persona-based debates for critical decisions where multiple
 //! perspectives (e.g., Security Auditor vs Performance Optimizer) synthesize
 //! the best approach through dialectical reasoning.
 
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 /// A persona that Ralph can assume during debates
@@ -38,7 +37,8 @@ Your primary concerns are:
 5. Input validation gaps
 
 Critique the proposed changes from a security perspective. Be thorough but constructive.
-Propose specific mitigations for any issues found."#.to_string(),
+Propose specific mitigations for any issues found."#
+                .to_string(),
         }
     }
 
@@ -63,11 +63,13 @@ Your primary concerns are:
 5. Resource lifecycle management
 
 Critique the proposed changes from a performance perspective. Suggest optimizations
-while maintaining code clarity."#.to_string(),
+while maintaining code clarity."#
+                .to_string(),
         }
     }
 
     /// Architecture Purist persona - prioritizes clean design
+    #[allow(dead_code)]
     pub fn architecture_purist() -> Self {
         Self {
             name: "Architecture Purist".to_string(),
@@ -88,11 +90,13 @@ Your primary concerns are:
 5. Long-term maintainability
 
 Critique the proposed changes from an architectural perspective. Suggest patterns
-that improve the design without over-engineering."#.to_string(),
+that improve the design without over-engineering."#
+                .to_string(),
         }
     }
 
     /// User Experience Advocate persona - prioritizes usability
+    #[allow(dead_code)]
     pub fn ux_advocate() -> Self {
         Self {
             name: "UX Advocate".to_string(),
@@ -113,35 +117,50 @@ Your primary concerns are:
 5. Graceful handling of edge cases
 
 Critique the proposed changes from a user experience perspective. Consider both
-developers using this code and end-users affected by it."#.to_string(),
+developers using this code and end-users affected by it."#
+                .to_string(),
         }
     }
 }
 
-/// Result of a debate round
+/// Result of a single debate round with critique and actionable suggestions
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DebateRound {
+    /// The persona name (e.g., "Security Auditor")
     pub persona: String,
+    /// Detailed text critique of the proposed change
     pub critique: String,
+    /// Specific actionable suggestions to address identified issues
     pub suggestions: Vec<String>,
+    /// Severity level of the findings
     pub severity: DebateSeverity,
 }
 
+/// Severity classification for debate findings
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum DebateSeverity {
-    Critical,   // Must address before proceeding
-    Important,  // Should address, but can proceed
-    Minor,      // Nice to have
-    Neutral,    // No issues found
+    /// Must address before proceeding (Blocker)
+    Critical,
+    /// Should address, but not strictly blocking (High)
+    Important,
+    /// Nice to have improvements (Low)
+    Minor,
+    /// No issues found (Pass)
+    Neutral,
 }
 
-/// Synthesis of multiple debate rounds into a final recommendation
+/// Final synthesis of multiple debate perspectives into a unified recommendation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DebateSynthesis {
+    /// Executive summary of the debate outcome
     pub summary: String,
+    /// Points where multiple personas reached agreement
     pub consensus_points: Vec<String>,
+    /// Situations where personas disagree on the best approach
     pub conflicts: Vec<DebateConflict>,
+    /// The final authoritative recommendation (APPROVED/HOLD/PROCEED)
     pub final_recommendation: String,
+    /// Prioritized action items extracted from suggestions
     pub action_items: Vec<ActionItem>,
 }
 
@@ -183,6 +202,7 @@ impl Debate {
     }
 
     /// Full architecture review with all perspectives
+    #[allow(dead_code)]
     pub fn full_review() -> Self {
         Self::new()
             .with_persona(Persona::security_auditor())
@@ -252,19 +272,23 @@ impl Debate {
 
     /// Synthesize multiple debate rounds into a final recommendation
     pub fn synthesize(rounds: &[DebateRound]) -> DebateSynthesis {
-        let mut consensus_points = Vec::new();
-        let mut conflicts = Vec::new();
+        let consensus_points = Vec::new();
+        let conflicts = Vec::new();
         let mut action_items = Vec::new();
 
         // Collect all suggestions
-        let all_suggestions: Vec<_> = rounds
+        let _all_suggestions: Vec<_> = rounds
             .iter()
             .flat_map(|r| r.suggestions.iter().map(|s| (r.persona.clone(), s.clone())))
             .collect();
 
         // Find the most severe issues
-        let has_critical = rounds.iter().any(|r| r.severity == DebateSeverity::Critical);
-        let has_important = rounds.iter().any(|r| r.severity == DebateSeverity::Important);
+        let has_critical = rounds
+            .iter()
+            .any(|r| r.severity == DebateSeverity::Critical);
+        let has_important = rounds
+            .iter()
+            .any(|r| r.severity == DebateSeverity::Important);
 
         // Generate action items from suggestions with priority based on severity
         for round in rounds {
@@ -292,7 +316,8 @@ impl Debate {
         } else if has_important {
             "Important concerns raised that should be addressed.".to_string()
         } else {
-            "No significant issues identified. Proceed with minor adjustments if suggested.".to_string()
+            "No significant issues identified. Proceed with minor adjustments if suggested."
+                .to_string()
         };
 
         let final_recommendation = if has_critical {

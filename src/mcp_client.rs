@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
-use std::sync::Arc;
-use std::collections::HashMap;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct McpRequest {
@@ -50,7 +50,7 @@ impl McpClient {
 
         let stdin = child.stdin.take().context("No stdin")?;
         let stdout = child.stdout.take().context("No stdout")?;
-        
+
         let client = Self {
             _child: child,
             stdin: Arc::new(Mutex::new(stdin)),
@@ -74,11 +74,16 @@ impl McpClient {
         });
 
         // Initialize connection
-        client.call("initialize", json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": { "name": "Ralph-Nano", "version": "0.3.0" }
-        })).await?;
+        client
+            .call(
+                "initialize",
+                json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": { "name": "Ralph-Nano", "version": "0.3.0" }
+                }),
+            )
+            .await?;
 
         Ok(client)
     }
@@ -115,7 +120,7 @@ impl McpClient {
         if let Some(err) = res.error {
             return Err(anyhow::anyhow!("MCP Error: {}", err));
         }
-        
+
         Ok(res.result.unwrap_or(Value::Null))
     }
 
@@ -126,10 +131,14 @@ impl McpClient {
     }
 
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value> {
-        self.call("tools/call", json!({
-            "name": name,
-            "arguments": arguments
-        })).await
+        self.call(
+            "tools/call",
+            json!({
+                "name": name,
+                "arguments": arguments
+            }),
+        )
+        .await
     }
 }
 
@@ -139,7 +148,9 @@ pub struct McpManager {
 
 impl McpManager {
     pub fn new() -> Self {
-        Self { clients: Vec::new() }
+        Self {
+            clients: Vec::new(),
+        }
     }
 
     pub async fn add_server(&mut self, name: &str, command: &str, args: &[&str]) -> Result<()> {
@@ -157,7 +168,12 @@ impl McpManager {
         Ok(all_tools)
     }
 
-    pub async fn call_tool(&self, server_name: &str, tool_name: &str, arguments: Value) -> Result<Value> {
+    pub async fn call_tool(
+        &self,
+        server_name: &str,
+        tool_name: &str,
+        arguments: Value,
+    ) -> Result<Value> {
         for (name, client) in &self.clients {
             if name == server_name {
                 return client.call_tool(tool_name, arguments).await;

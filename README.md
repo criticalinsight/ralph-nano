@@ -8,7 +8,7 @@ Ralph-Nano is a high-performance, single-binary autonomous coding agent written 
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 [![Platform](https://img.shields.io/badge/platform-macos-lightgrey.svg)](https://www.apple.com/macos/)
 
-## 🚀 Key Features (v1.2.0)
+## 🚀 Key Features (v0.2.4)
 
 *   **Multi-Agent Swarm**: Spawn parallel "Worker Nanos" to handle independent subsystems concurrently.
 *   **Self-Evolution**: Dynamic tool generation via compiled `.wasm` plugins for specialized tasks.
@@ -27,13 +27,15 @@ Ralph-Nano is a high-performance, single-binary autonomous coding agent written 
 ```bash
 git clone https://github.com/yourusername/ralph-nano.git
 cd ralph-nano
-cargo build --release
+cargo install --path .
 ```
+> [!TIP]
+> Ensure `~/.cargo/bin` is in your `$PATH`. You can then run the agent simply by typing `ralph-nano`.
 
 ### 2. Initialize a Workspace
 Go to your project directory and run:
 ```bash
-/path/to/ralph-nano init
+ralph-nano init
 ```
 This creates the isolated `.ralph` directory and a default `config.toml`.
 
@@ -45,7 +47,7 @@ GEMINI_API_KEY=your_key_here
 
 ### 4. Ignite the Brain
 ```bash
-/path/to/ralph-nano
+ralph-nano
 ```
 
 ## 🎮 Usage
