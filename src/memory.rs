@@ -81,6 +81,17 @@ impl Memory {
             }
         };
 
+        // Initialize cache table for semantic caching
+        let cache_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("vector", DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), 384), false),
+            Field::new("query", DataType::Utf8, false),
+            Field::new("response", DataType::Utf8, false),
+        ]));
+        if db.open_table("cache").execute().await.is_err() {
+            let _ = db.create_empty_table("cache", cache_schema).execute().await;
+        }
+
         Ok(Self {
             db: Arc::new(db),
             table,
@@ -254,6 +265,74 @@ impl Memory {
             .map(|n| n.content)
             .collect();
         Ok(facts)
+    }
+
+    /// Check cache for a semantically similar query
+    pub async fn check_cache(&self, query: &str) -> Result<Option<String>> {
+        let cache_table = match self.db.open_table("cache").execute().await {
+            Ok(t) => t,
+            Err(_) => return Ok(None),
+        };
+
+        let embeddings = self.generate_embeddings(&[query.to_string()])?;
+        let query_vector = embeddings.first().ok_or(anyhow!("Failed to embed query"))?;
+
+        let results = cache_table
+            .query()
+            .nearest_to(query_vector.clone())?
+            .limit(1)
+            .execute()
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        for batch in results {
+            if batch.num_rows() == 0 {
+                return Ok(None);
+            }
+            // Check distance. LanceDB returns _distance column.
+            if let Some(dist_col) = batch.column_by_name("_distance") {
+                if let Some(dist_arr) = dist_col.as_any().downcast_ref::<Float32Array>() {
+                    let distance = dist_arr.value(0);
+                    if distance < 0.1 { // Strict threshold for cache hit
+                        let responses: &StringArray = batch.column_by_name("response").unwrap().as_any().downcast_ref().unwrap();
+                        return Ok(Some(responses.value(0).to_string()));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Store a query-response pair in the cache
+    pub async fn store_cache(&self, query: &str, response: &str) -> Result<()> {
+        let cache_table = self.db.open_table("cache").execute().await?;
+
+        let embeddings = self.generate_embeddings(&[query.to_string()])?;
+        let id = uuid::Uuid::new_v4().to_string();
+
+        let ids = StringArray::from(vec![id]);
+        let queries = StringArray::from(vec![query.to_string()]);
+        let responses = StringArray::from(vec![response.to_string()]);
+        
+        let vectors = FixedSizeListArray::from_iter_primitive::<arrow_array::types::Float32Type, _, _>(
+            embeddings.iter().map(|v| Some(v.iter().map(|&x| Some(x)))),
+            384
+        );
+
+        let schema = cache_table.schema().await?;
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(ids),
+                Arc::new(vectors),
+                Arc::new(queries),
+                Arc::new(responses),
+            ],
+        )?;
+
+        cache_table.add(Box::new(RecordBatchIterator::new(vec![Ok(batch)], cache_table.schema().await?))).execute().await?;
+        Ok(())
     }
 }
 

@@ -923,10 +923,76 @@ fn init_workspace() -> Result<()> {
     Ok(())
 }
 
+/// Worker loop for Swarm parallelism - executes tasks from the queue
+async fn run_worker_loop() -> Result<()> {
+    let worker_id = env::var("RALPH_WORKER_ID").unwrap_or_else(|_| "worker-0".to_string());
+    println!("🐝 Worker {} starting...", worker_id);
+    
+    dotenvy::from_filename(".env").ok();
+    let config_path = format!("{}/config.toml", RALPH_DIR);
+    let config_str = fs::read_to_string(&config_path).unwrap_or_default();
+    let config: RalphConfig = toml::from_str(&config_str).unwrap_or_default();
+    
+    let cortex = Cortex::new(config)?;
+    let memory = Arc::new(Memory::new(&format!("{}/lancedb", RALPH_DIR)).await?);
+    
+    let status_path = format!("{}/swarm/{}/status.json", RALPH_DIR, worker_id);
+    let task_path = format!("{}/swarm/{}/task.txt", RALPH_DIR, worker_id);
+    
+    loop {
+        // Check for a task file
+        if Path::new(&task_path).exists() {
+            let task = fs::read_to_string(&task_path)?;
+            if !task.trim().is_empty() {
+                println!("🐝 Worker {} executing: {}", worker_id, task.trim());
+                
+                // Update status to Working
+                let status = swarm::WorkerStatus {
+                    id: worker_id.clone(),
+                    state: swarm::WorkerState::Working,
+                    current_task: Some(task.trim().to_string()),
+                    completed_tasks: 0,
+                };
+                fs::write(&status_path, serde_json::to_string_pretty(&status)?)?;
+                
+                // Execute the task (simplified: just call LLM)
+                let prompt = format!("Execute this task autonomously:\n{}", task);
+                if let Ok(mut stream) = cortex.stream_generate(&prompt).await {
+                    let mut response = String::new();
+                    while let Some(chunk) = stream.next().await {
+                        if let Ok(token) = chunk { response.push_str(&token); }
+                    }
+                    println!("🐝 Worker {} completed task.", worker_id);
+                    
+                    // Store result and cache
+                    let _ = memory.store_cache(&task, &response).await;
+                }
+                
+                // Clear task file
+                fs::remove_file(&task_path)?;
+                
+                // Update status to Idle
+                let status = swarm::WorkerStatus {
+                    id: worker_id.clone(),
+                    state: swarm::WorkerState::Idle,
+                    current_task: None,
+                    completed_tasks: 1,
+                };
+                fs::write(&status_path, serde_json::to_string_pretty(&status)?)?;
+            }
+        }
+        
+        sleep(Duration::from_millis(500)).await;
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
     if args.len() > 1 && args[1] == "init" { return init_workspace(); }
+    if args.contains(&"--worker-mode".to_string()) {
+        return run_worker_loop().await;
+    }
     if !Path::new(RALPH_DIR).exists() {
         anyhow::bail!("Ralph not initialized. Run `ralph-nano init` to replicate DNA here.");
     }
