@@ -29,7 +29,7 @@ impl Memory {
     pub async fn new(uri: &str) -> Result<Self> {
         let db = lancedb::connect(uri).execute().await?;
         let mut options = InitOptions::default();
-        options.model_name = EmbeddingModel::AllMiniLML6V2;
+        options.model_name = EmbeddingModel::BGESmallENV15;
         let embedder = TextEmbedding::try_new(options)?;
 
         // Initialize table if not exists with Graph-over-Vector schema
