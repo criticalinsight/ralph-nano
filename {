@@ -1,0 +1,12 @@
+  "directives": [
+    "exec_shell('cat ROADMAP.md', false)",
+    "exec_shell('cargo check', false)",
+    "exec_shell('ls -F', false)"
+  ],
+  "tasks_to_add": [
+    "Verify baseline stability of main branch",
+    "Initialize or update TASKS.md based on ROADMAP.md",
+    "Diagnose cause of previous speculation verification failure"
+  ],
+  "reasoning": "The previous speculation failed verification, implying the attempted change broke the build or tests. Before attempting a retry, we must 1) confirm the main branch is currently stable, 2) consult the ROADMAP to confirm the immediate objective, and 3) ensure TASKS.md exists to track this debugging/development cycle."
+}

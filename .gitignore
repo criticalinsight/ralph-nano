@@ -2,3 +2,6 @@
 .env
 .DS_Store
 /lancedb_data
+
+# Ralph Agent Data
+.ralph/
