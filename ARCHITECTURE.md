@@ -1,126 +1,84 @@
-# Architecture: Ralph-Nano
+# Architecture: Ralph-Nano v2.4 (Godmode)
 
-## High-Level System Design
+## Core Philosophy: "Maximum Intelligence, Zero Vulnerabilities"
 
-Ralph-Nano operates as a single-binary, asynchronous Rust application. It leverages the Actor model pattern (via `tokio` tasks and `Arc<RwLock>`) to manage shared state between the main interaction loop and background maintenance tasks.
+Ralph-Nano operates as a **high-velocity, SecOps-hardened cybernetic organism** optimized for Apple Silicon. We follow the **Hickey Strategic Doctrine** (Simplicity & Decomplection) to build the "Vim of Agents."
+
+### Strategic Foundation (The Hickey Lens)
+
+1.  **Temporal Decoupling**: The **Cortex** is a pure conduit. Its role is routing, not execution. By separating impulse reception from execution handlers, we eliminate temporal braiding.
+2.  **Identity vs. Value**: **OverlayFS** treats the filesystem as a sequence of immutable snapshots. Every specualtive action yields a new "Value" of the codebase, leaving the process "Identity" untangled.
+3.  **Data-Orientation**: All internal engine communication (Reflexion, Knowledge, Janitor) occurs via "dumb" data (Structs/Enums). We prioritize unentangled roots over complex object taxonomies.
+4.  **Vim Philosophy**: Composition over Monoliths. We transform data through small, ortho-gonal functions: `Impulse -> Context -> Action`.
 
 ```mermaid
 graph TD
-    User[User Terminal] -->|Input| MainLoop[Context Cannon (Main Loop)]
-    
-    subgraph "Core Logic"
-        MainLoop -->|Read| FS[File System]
-        MainLoop -->|Query| VectorStore[CozoDB Vector & Graph Store]
-        MainLoop -->|Prompt| Gemini[Gemini API]
-        MainLoop -->|Trigger Scan| Knowledge[Knowledge Engine]
+    subgraph "Apple Silicon Hardware"
+        P_Core[P-Cores: Inference & Execution]
+        E_Core[E-Cores: Security & Indexing]
+        Metal[Metal: Vector Acceleration]
+    end
+
+    subgraph "Ralph-Nano Process (v2.4)"
+        EventBus{Flash-Kinetic Cortex}
         
-        Knowledge -->|Scrape| Web[docs.rs / npm / pypi]
-        Knowledge -->|Learn| VectorStore
+        %% Fast Path (Priority Channel)
+        User((User Impulse)) -->|Priority| EventBus
+        EventBus -->|P-Core| Planner[Planner / Reflexion]
+        Planner -->|Inference| Gemini[Gemini 3.0 Flash]
+        Planner -->|Speculate| Overlay[OverlayFS Safety Shield]
+        Overlay -->|Verify| Sentry[Sentry / Verifier]
         
-        Gemini -->|Draft Plan| Reflexion[Reflexion Engine]
-        Reflexion -->|Speculate| Shadow[Shadow Workspace]
-        Reflexion -->|Delegate| Swarm[Swarm Manager]
-        Reflexion -->|Execute| Wasm[Wasm Runtime]
+        %% Slow Path (Background Channel)
+        Sentry -->|Scan| E_Core
+        FileWatcher[File Watcher] -->|Background| EventBus
+        EventBus -->|E-Core| GraphBuilder[Graph Builder]
+        GraphBuilder -->|Update| Cozo[Active Memory]
+        EventBus -->|E-Core| Janitor[Janitor / Maintenance]
+        Janitor -->|Optimize| Cozo
         
-        Shadow -->|cargo check| Verifier[Verifier]
-        Verifier -->|Pass/Fail| Reflexion
-        Reflexion -->|Approved Plan| Executor[Command Executor]
-        
-        Swarm -->|Worker Nanos| Executor
+        %% Hardware Mapping
+        Cozo -.->|Embeddings| Metal
     end
     
-    subgraph "Background Tasks"
-        Janitor[Janitor Task] -->|Prune/Summarize| VectorStore
-        Janitor -->|Read History| AppState
-    end
-    
-    Executor -->|Modify| FS
-    Executor -->|Run| Shell[System Shell]
-    
-    AppState[Shared State (History/Config)] -.-> MainLoop
-    AppState -.-> Janitor
+    Overlay -->|Atomic Commit| FS[Real File System]
 ```
 
 ## Component Breakdown
 
-### 1. `Tools Module` (The Hands & Eyes)
-- **Role**: Context Gathering and Execution.
-- **Location**: `src/tools.rs`.
-- **Implementation**: Encapsulates file system operations, context scanning (`walkdir`), and symbol extraction (`syn`, `regex`).
-- **Key Functions**:
-  - `scan_workspace`: Recursively builds context, adhering to `.ralph` skip lists.
-  - `scan_symbols`: Extracts function/struct signatures for the "Symbol Cannon".
-  - `exec_shell`: Safely executes shell commands with user/autonomous checks.
+### 0. `Cortex` (The Nervous System)
+- **Role**: Event-Driven Coordination & QoS with **Variable Thinking**.
+- **Location**: `src/core/cortex.rs` & `src/core/loop.rs`.
+- **Implementation**: 
+    - **QoS**: Biased `tokio::select!` loop with dual channels (`Priority` vs `Background`).
+    - **Reasoning**: `ThinkingLevel` enum controls Gemini 3.0 Flash effort (High/Low/Minimal).
+- **v2.4 Hardening**: System instructions are resident in the Cortex, enforcing the "Godmode" identity across all models.
 
-### 2. `ShadowWorkspace` (The Sandbox)
-- **Role**: Safe Speculation.
-- **Implementation**: A dedicated directory `.ralph/shadow` where edits are staged.
-- **Logic**:
-  - Copies `src/`, `Cargo.toml`, and `Cargo.lock` to a isolated environment.
-  - Applies proposed LLM edits to the shadow files first.
-  - Runs `cargo check` to verify that proposed changes don't break the build.
-  - **Path Sanitization**: Helper `is_safe_path` ensures all file operations remain within the workspace, preventing path traversal attacks.
-  - **Universal Mode**: Detection logic skips `cargo check` if it's not a Rust project, allowing the sandbox to be used for general file verification.
+### 1. `OverlayFS` (The Safety Shield)
+- **Role**: Transactional Filesystem Isolation ("Speculative Execution").
+- **Location**: `src/safety/overlay.rs`.
+- **Logic**: All `WriteFile` directives target a Copy-on-Write overlay. No changes reach the real filesystem without a `Commit` after passing the **Crucible** (verification tests).
 
-### 3. `VectorStore` (The Hippocampus)
-- **Role**: Long-term memory.
-- **Implementation**: Wrapper around `cozo` (RocksDB) + `candle`.
-- **Schema**:
-  - `nodes`: Graph nodes with `id`, `content`, `type`, `path`.
-  - `edges`: Relationships between nodes (`from`, `to`, `rel_type`).
-  - `cache`: Semantic cache with `id`, `query`, `response`, and HNSW-indexed `embedding`.
-- **Operations**: `store_memory`, `query_memories`, `prune_stale_memories`, `semantic_cache_lookup`, `batch_add_library_entries`, `search_library`.
+### 2. `ActiveMemory` (The Hippocampus)
+- **Role**: Graph-Guided Vector Store (CozoDB).
+- **Implementation**: Metal-accelerated embeddings via `candle`. Neighborhood expansion replaces brute-force RAG.
 
-### 4. `KnowledgeEngine` (The Autodidact)
-- **Role**: Continuous external learning.
-- **Implementation**: Multi-language manifest parser + asynchronous concurrent scraper.
-- **Logic**:
-  - Scanning: Detects Rust, Node.js, and Python dependencies.
-  - Concurrency: Uses `futures` stream buffering for parallel sub-module ingestion.
-  - Chunking: Semantic line-splitting with "definition" detection for weighted retrieval.
-  - Batching: High-throughput embedding and bulk insertion into CozoDB.
+### 3. `The Sentinel` (Security Gate)
+- **Role**: Automated Linting & Safety Audits.
+- **Tools**: `cargo clippy`, `SemanticLinter`, and parallel persona-based **Debates** (Security vs Performance).
 
-### 5. `ReflexionEngine` (The Prefrontal Cortex)
-- **Role**: Judgment and Safety.
-- **Mechanism**:
-  1. **Parses** response into `Action` variants (`WriteFile`, `ExecShell`).
-  2. **Triggers Shadow Verification** for all file writes.
-  3. **Generates Diffs** using the `similar` crate for visual user confirmation.
-  4. **The Governor**: In autonomous mode, injects safety instructions to forbid `git push --force` and deletions outside shadow.
+### 4. `The Swarm` (Concurrency)
+- **Role**: Multi-core delegation.
+- **Logic**: Spawns background Workers to handle large-scale refactors or deep documentation ingest without blocking the main event bus.
 
-### 5. `Janitor` (The Glymphatic System)
-- **Role**: Maintenance.
-- **Implementation**: A detached `tokio::spawn` task.
-- **Schedule**: Wakes up every 300s.
-- **Tasks**:
-  - **Pruning**: Deletes irrelevant memories.
-  - **Consolidation**: Summarizes long histories into "Lessons".
-
-### 6. `Main Loop` (v0.2.4)
-- **Role**: Coordination and Oversight.
-- **Implementation**: Infinite loop with Dual Role support and Pro-only inference.
-- **Supervisor Features**:
-    - **Symbol Scanning**: Leverages `Tools::scan_symbols` to provide high-level signatures instead of full text for large codebases.
-    - **Structured Directives**: Enforces JSON communication (`{ "directives": [...] }`).
-    - **Task Compression**: prunes `TASKS.md` to keep context focused.
-
-### 7. `WasmRuntime` (Self-Evolution)
-- **Role**: Secure tool expansion.
-- **Implementation**: `wasmtime` engine with WASI Preview 1.
-- **Logic**: Executes compiled `.wasm` plugins generated by the agent.
-
-### 8. `SwarmManager` (Concurrency)
-- **Role**: Parallel work distribution.
-- **Implementation**: Process-based isolation with file-based IPC.
-- **Logic**: Manages the lifecycle and tasking of "Worker Nanos".
 
 ## Data Flow
 
 1. **User Turn**: Input is captured or polled from `TASKS.md`.
 2. **Context Assembly**: `Codebase` + `Vector Memory` + `Session History`.
 3. **Prompting**: Construction of the "Mega-Prompt".
-4. **Inference**: Sent to Gemini 1.5 Pro.
-5. **Speculation**: Proposed edits are written to `ShadowWorkspace`.
+4. **Inference**: Sent to **Gemini 3.0 Flash** (with 2.5 Fallback).
+5. **Speculation**: Proposed edits are staged in **OverlayFS**.
 6. **Verification**: Build check (if applicable) and Diff generation.
 7. **Execution**: If safe/approved, changes are committed to the real workspace.
 8. **Memory Update**: Interaction is logged for the Janitor.

@@ -2,6 +2,7 @@
 
 use regex::Regex;
 
+#[allow(dead_code)]
 pub struct Reflexion;
 
 impl Reflexion {

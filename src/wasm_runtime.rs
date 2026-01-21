@@ -5,6 +5,7 @@ use wasmtime::*;
 use wasmtime_wasi::preview1::{add_to_linker_sync, WasiP1Ctx};
 use wasmtime_wasi::WasiCtxBuilder;
 
+#[allow(dead_code)]
 pub struct WasmRuntime {
     engine: Engine,
 }

@@ -30,6 +30,7 @@ pub enum WorkerState {
     Syncing,
 }
 
+#[allow(dead_code)]
 pub struct SwarmWorker {
     pub id: String,
     process: Child,
@@ -96,6 +97,7 @@ impl SwarmWorker {
     }
 }
 
+#[allow(dead_code)]
 pub struct SwarmManager {
     workers: HashMap<String, SwarmWorker>,
     workspace: std::path::PathBuf,

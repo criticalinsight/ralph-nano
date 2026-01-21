@@ -17,9 +17,9 @@ Ralph-Nano is a high-performance, single-binary autonomous coding agent written 
 *   **Rollback Snapshots**: Zero-cost restoration of workspace state via `.ralph/snapshots`.
 *   **Semantic Linting**: LLM-guided linting for catching logical API misuse.
 *   **Auto-Didact Engine**: Automatically learns your tech stack by scanning manifests and scraping official documentation.
-*   **Local RAG Re-ranking**: Uses `candle` engine to prune Top-50 vector hits down to Top-10 critical symbols.
-*   **Persistent Autonomy**: The agent polls `TASKS.md` for new work, enabling continuous integration.
-*   **Shadow Workspace**: Proposals are safely staged and verified in a sandbox before touching your source code.
+*   **Memory**: Active RAG via **CozoDB** and Metal-accelerated embeddings (`candle`).
+*   **Cortex**: Powered by **Gemini 3.0** with **Thinking Levels** (`High` / `Low`).
+*   **Godmode**: Event-driven QoS + `OverlayFS` safety shield for transactional edits.
 
 ## 🛠️ Quick Start
 
@@ -59,7 +59,7 @@ Once running, you maintain a conversation with Ralph or add tasks to `TASKS.md`.
 project_name = "my-awesome-app"
 autonomous_mode = true          # Set to true for headless operation
 max_autonomous_loops = 50       # Circuit breaker for API spend
-primary_model = "gemini-3-pro-preview"
+primary_model = "gemini-3-flash-preview"
 ```
 
 ### Slash Commands
@@ -75,7 +75,8 @@ Contributions are welcome! Please check the [ROADMAP.md](ROADMAP.md) for current
 ## ⚠️ Safety Notice
 
 Ralph-Nano can execute shell commands and modify files.
-- The **Shadow Workspace** attempts to catch broken builds.
+- The **OverlayFS Safety Shield** ensures all edits are transactional and specualtive.
+- **The Crucible** build-gate prevents corrupted commits in Rust projects.
 - **The Governor** prevents dangerous autonomous actions like `git push --force`.
 - **Always** commit your work before letting an agent modify your codebase.
 

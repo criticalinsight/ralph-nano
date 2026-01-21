@@ -24,8 +24,9 @@ To build the "vim of agents"—lightweight, incredibly fast, and powerful. It sh
 - **Platform**: Optimized for macOS (Apple Silicon).
 
 ### 4.2 AI & Reasoning
-- **Primary Brain**: Gemini 1.5 Pro (via direct API).
-- **Context Window**: Leverage Gemini's 2M token window for "Context Cannon" mode.
+- **Primary Brain**: **Gemini 3.0 Flash-Preview** (Primary) with **Gemini 2.5 Flash** (Fallback).
+  - Features: **Thinking Levels** (`High`/`Low`/`Auto`) for variable reasoning depth.
+- **Context Window**: Leverage Gemini's large token window for "Context Cannon" mode.
 - **Feedback Loop**: "Reflexion Engine" that critiques plans before execution.
 
 ### 4.3 Memory System
@@ -44,11 +45,11 @@ To build the "vim of agents"—lightweight, incredibly fast, and powerful. It sh
 - **Goal**: Instantly load the relevant parts (or all) of a codebase into the LLM's context.
 - **Mechanism**: Parallel directory walking, intelligent file filtering, token estimation.
 
-### 5.2 The Reflexion Engine (Safe Speculation)
+### 5.2 The Crucible (Safe Speculation)
 - **Goal**: Prevent hallucinations and dangerous commands through sandboxed validation.
 - **Mechanism**:
-  1. **Shadow Workspace**: Edits are first applied to a `.ralph/shadow` directory.
-  2. **Cargo Check**: In Rust projects, `cargo check` is run against the shadow workspace to verify compilation.
+  1. **OverlayFS**: Edits are first applied to a transactional `OverlayFS` safety shield.
+  2. **Cargo Check**: In Rust projects, `cargo check` is run against the overlay to verify compilation.
   3. **Universal Mode**: In non-Rust projects, compilation checks are gracefully skipped while maintaining the path-based sandboxing.
   3. **Path Sanitization**: Helper `is_safe_path` ensures all file operations remain within the workspace.
   4. **Interactive Diff**: Users see colored diffs before changes are committed to the real workspace.
@@ -56,7 +57,7 @@ To build the "vim of agents"—lightweight, incredibly fast, and powerful. It sh
 ### 5.3 Persistent Autonomy & Supervision (v0.2.4)
 - **Goal**: Maintain continuous oversight and guide external executors with maximum token efficiency.
 - **Mechanism**:
-  - **Single Pro Model**: Uses `gemini-3-pro-preview` exclusively for all reasoning.
+  - **Model**: Uses `gemini-3-flash-preview` with variable thinking.
   - **The Symbol Cannon**: Uses `scan_symbols` to provide high-level architectural context without implementational bloat.
   - **Structured Directives**: Mandates JSON output for clear coordination with executors.
   - **Task Compression**: Automatically archives completed tasks in `TASKS.md` after 5 completions.
@@ -100,7 +101,7 @@ To build the "vim of agents"—lightweight, incredibly fast, and powerful. It sh
 - **Startup Time**: < 100ms.
 - **Context Loading**: < 1s for 10MB codebase.
 - **Memory Footprint**: < 100MB (idle).
-- **Safety**: 0 accidental destructive commands executed in test suite thanks to Shadow Workspace.
+- **Safety**: 0 accidental destructive commands executed in test suite thanks to OverlayFS.
 
 ## 7. Future Considerations (M2 Pro Performance)
 - **Metal-Accelerated RAG**: Offloading context filtering to the GPU for sub-50ms retrieval.

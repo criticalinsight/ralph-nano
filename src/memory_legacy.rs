@@ -58,7 +58,10 @@ impl Memory {
             }
         ";
         if let Err(e) = db.run_script(create_cache, Default::default(), ScriptMutability::Mutable) {
-            println!("⚠️ Cache table creation warning: {}", e);
+            let msg = e.to_string();
+            if !msg.contains("conflicts with an existing one") && !msg.contains("already exists") {
+                println!("Table/Index creation error: {}", e);
+            }
         }
 
         let create_index = "
@@ -71,18 +74,47 @@ impl Memory {
                 ef_construction: 200
             }
         ";
-        let _ = db.run_script(create_index, Default::default(), ScriptMutability::Mutable);
+        if let Err(e) = db.run_script(create_index, Default::default(), ScriptMutability::Mutable) {
+            let msg = e.to_string();
+            if !msg.contains("conflicts with an existing one") && !msg.contains("already exists") {
+                println!("Cache index creation error: {}", e);
+            }
+        }
 
+        // Updated Schema for Active RAG: includes embedding in nodes
         let create_nodes = "
             :create nodes {
                 id: String
                 =>
                 content: String,
                 type: String,
-                path: String
+                path: String,
+                embedding: <F32; 384>
             }
         ";
-        let _ = db.run_script(create_nodes, Default::default(), ScriptMutability::Mutable);
+        if let Err(e) = db.run_script(create_nodes, Default::default(), ScriptMutability::Mutable) {
+            let msg = e.to_string();
+            if !msg.contains("conflicts with an existing one") && !msg.contains("already exists") {
+                println!("Database initialization error (nodes): {}", e);
+            }
+        }
+
+        let create_nodes_idx = "
+            ::hnsw create nodes:idx {
+                dim: 384,
+                dtype: F32,
+                fields: [embedding],
+                distance: Cosine,
+                m: 50,
+                ef_construction: 200
+            }
+        ";
+        if let Err(e) = db.run_script(create_nodes_idx, Default::default(), ScriptMutability::Mutable) {
+            let msg = e.to_string();
+            if !msg.contains("conflicts with an existing one") && !msg.contains("already exists") && !msg.contains("non-existent field") {
+                println!("Database initialization error (nodes_idx): {}", e);
+            }
+        }
 
         let create_edges = "
             :create edges {
@@ -92,7 +124,12 @@ impl Memory {
                 rel_type: String
             }
         ";
-        let _ = db.run_script(create_edges, Default::default(), ScriptMutability::Mutable);
+        if let Err(e) = db.run_script(create_edges, Default::default(), ScriptMutability::Mutable) {
+            let msg = e.to_string();
+            if !msg.contains("conflicts with an existing one") && !msg.contains("already exists") {
+                println!("Database initialization error (edges): {}", e);
+            }
+        }
 
         // Initialize Library Table for Docs (Enhanced)
         let create_library = "
@@ -112,7 +149,10 @@ impl Memory {
             Default::default(),
             ScriptMutability::Mutable,
         ) {
-            println!("⚠️ Library table creation warning: {}", e);
+            let msg = e.to_string();
+            if !msg.contains("conflicts with an existing one") && !msg.contains("already exists") {
+                println!("Database initialization error (library): {}", e);
+            }
         }
 
         let create_kv = "
@@ -123,7 +163,12 @@ impl Memory {
                 created_at: Int
             }
         ";
-        let _ = db.run_script(create_kv, Default::default(), ScriptMutability::Mutable);
+        if let Err(e) = db.run_script(create_kv, Default::default(), ScriptMutability::Mutable) {
+            let msg = e.to_string();
+            if !msg.contains("conflicts with an existing one") && !msg.contains("already exists") {
+                println!("Database initialization error (kv): {}", e);
+            }
+        }
 
         let create_sync = "
             :create sync_log {
@@ -133,7 +178,12 @@ impl Memory {
                 content_hash: String
             }
         ";
-        let _ = db.run_script(create_sync, Default::default(), ScriptMutability::Mutable);
+        if let Err(e) = db.run_script(create_sync, Default::default(), ScriptMutability::Mutable) {
+            let msg = e.to_string();
+            if !msg.contains("conflicts with an existing one") && !msg.contains("already exists") {
+                println!("Database initialization error (sync): {}", e);
+            }
+        }
 
         let create_lib_index = "
             ::hnsw create library:idx {
@@ -145,15 +195,20 @@ impl Memory {
                 ef_construction: 200
             }
         ";
-        let _ = db.run_script(
+        if let Err(e) = db.run_script(
             create_lib_index,
             Default::default(),
             ScriptMutability::Mutable,
-        );
+        ) {
+            let msg = e.to_string();
+            if !msg.contains("conflicts with an existing one") && !msg.contains("already exists") {
+                println!("Database initialization error (lib_idx): {}", e);
+            }
+        }
 
         // Initialize Candle with Metal support (MacOS GPU)
         let device = Device::new_metal(0).unwrap_or(Device::Cpu);
-        println!("🧠 Trying Memory Module on device: {:?}", device);
+        println!("Trying Memory Module on device: {:?}", device);
 
         // Load model from HF Hub (BGE-Small-en-v1.5)
         let model_id = "BAAI/bge-small-en-v1.5".to_string();
@@ -183,7 +238,7 @@ impl Memory {
             Ok(res) => res,
             Err(e) => {
                 if device.is_metal() {
-                    println!("⚠️ Metal implementation incomplete for this model ({}). Falling back to CPU.", e);
+                    println!("Metal implementation incomplete for this model ({}). Falling back to CPU.", e);
                     let cpu_device = Device::Cpu;
                     let tensors = candle_core::safetensors::load(&weights_filename, &cpu_device)?;
                     let vb = candle_nn::VarBuilder::from_tensors(tensors, DType::F32, &cpu_device);
@@ -287,9 +342,11 @@ impl Memory {
     }
 
     pub async fn add_node(&self, node: &GraphNode) -> Result<()> {
+        let embedding = self.embed(&node.content)?;
+        
         let query_script = "
-            ?[id, content, type, path] <- [[$id, $content, $type, $path]]
-            :put nodes { id => content, type, path }
+            ?[id, content, type, path, embedding] <- [[$id, $content, $type, $path, $embedding]]
+            :put nodes { id => content, type, path, embedding }
         ";
 
         let mut params = BTreeMap::new();
@@ -297,6 +354,7 @@ impl Memory {
         params.insert("content".to_string(), DataValue::from(node.content.clone()));
         params.insert("type".to_string(), DataValue::from(node.node_type.clone()));
         params.insert("path".to_string(), DataValue::from(node.path.clone()));
+        params.insert("embedding".to_string(), vec_to_datavalue(embedding));
 
         self.db
             .run_script(query_script, params, ScriptMutability::Mutable)
@@ -347,25 +405,62 @@ impl Memory {
         .await
     }
 
-    pub async fn recall_facts(&self, _query: &str) -> Result<Vec<String>> {
-        // Placeholder: For now return all lessons. Ideally would be semantic search.
-        let script = "?[content] := *nodes{content, type}, type = 'lesson'";
-        let result = self
-            .db
-            .run_script(script, Default::default(), ScriptMutability::Immutable)
-            .map_err(|e| anyhow!("Failed to recall facts: {}", e))?;
-
+    pub async fn recall_facts(&self, query: &str) -> Result<Vec<String>> {
+        // Active RAG:
+        // 1. Convert query to embedding
+        // 2. Search `nodes` for semantic similarity
+        // 3. For top hits, expand to neighbors (Graph traversal)
+        
+        let embedding = self.embed(query)?;
+        
+        // Step 2: Vector Search on Nodes
+        let search_script = "
+            ?[content, id, dist] := ~nodes:idx {
+                content, id |
+                query: $query_vec,
+                k: 5,
+                bind_distance: dist,
+                ef: 100
+            }
+            :sort dist
+        ";
+        
+        let mut params = BTreeMap::new();
+        params.insert("query_vec".to_string(), vec_to_datavalue(embedding));
+        
+        let result = self.db.run_script(search_script, params, ScriptMutability::Immutable)
+            .map_err(|e| anyhow!("Active RAG Search failed: {}", e))?;
+            
         let mut facts = Vec::new();
+        let mut hit_ids = Vec::new();
+        
         for row in result.rows {
-            if let Some(DataValue::Str(s)) = row.first() {
-                facts.push(s.to_string());
+            if let Some(DataValue::Str(content)) = row.first() {
+                facts.push(content.to_string());
+            }
+            if let Some(DataValue::Str(id)) = row.get(1) {
+                hit_ids.push(id.to_string());
             }
         }
+        
+        // Step 3: Graph Expansion (Neighborhood)
+        for id in hit_ids {
+            if let Ok(neighbors) = self.get_neighborhood(&id).await {
+                for n in neighbors {
+                    // Avoid strict duplicates? (Vector might suffice, but simple scan ok)
+                    if !facts.contains(&n) {
+                         facts.push(format!("(Related) {}", n));
+                    }
+                }
+            }
+        }
+        
         Ok(facts)
     }
 
     pub async fn recall_heuristics(&self, _query: &str) -> Result<Vec<String>> {
-        let script = "?[content] := *nodes{content, type}, type = 'heuristic'";
+        // Correctly quoted string literal for Cozo script
+        let script = "?[content] := *nodes{content, type}, type = \"heuristic\"";
         let result = self
             .db
             .run_script(script, Default::default(), ScriptMutability::Immutable)
@@ -456,7 +551,7 @@ impl Memory {
 
             // Apply weight: boost definitions by reducing their perceived distance
             ?[content, score] := ?[content, type, dist],
-                weight = if type == 'definition' {{ 0.8 }} else {{ 1.0 }},
+                weight = if type == \"definition\" {{ 0.8 }} else {{ 1.0 }},
                 score = dist * weight
 
             :sort score
@@ -500,6 +595,43 @@ impl Memory {
         names.sort();
         names.dedup();
         Ok(names)
+    }
+
+    pub async fn get_known_libraries_with_versions(&self) -> Result<Vec<(String, String)>> {
+        let script = "?[name, version] := *library{name, version}";
+        let result = self
+            .db
+            .run_script(script, Default::default(), ScriptMutability::Immutable)
+            .map_err(|e| anyhow!("Failed to get known libraries with versions: {}", e))?;
+
+        let mut libs = Vec::new();
+        for row in result.rows {
+            if let (Some(DataValue::Str(name)), Some(DataValue::Str(version))) = (row.first(), row.get(1)) {
+                libs.push((name.to_string(), version.to_string()));
+            }
+        }
+        libs.sort();
+        libs.dedup();
+        Ok(libs)
+    }
+
+    pub async fn register_library(&self, name: &str, version: &str) -> Result<()> {
+        let script = "
+            ?[id, name, version, content, language, chunk_type, embedding] := 
+                id = $id, name = $name, version = $version, 
+                content = \"\", language = \"\", chunk_type = \"metadata\",
+                embedding = $empty_vec
+            :put library { id => name, version, content, language, chunk_type, embedding }
+        ";
+        let mut params = BTreeMap::new();
+        params.insert("id".to_string(), DataValue::from(format!("{}_{}", name, version)));
+        params.insert("name".to_string(), DataValue::from(name));
+        params.insert("version".to_string(), DataValue::from(version));
+        params.insert("empty_vec".to_string(), vec_to_datavalue(vec![0.0; 384]));
+        
+        self.db.run_script(script, params, ScriptMutability::Mutable)
+            .map_err(|e| anyhow!("Failed to register library {}: {}", name, e))?;
+        Ok(())
     }
 
     pub async fn get_kv_cache(&self, hash: &str) -> Result<Option<String>> {

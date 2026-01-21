@@ -183,6 +183,12 @@ pub struct Debate {
     personas: Vec<Persona>,
 }
 
+impl Default for Debate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Debate {
     pub fn new() -> Self {
         Self { personas: vec![] }

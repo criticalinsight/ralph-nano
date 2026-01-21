@@ -60,6 +60,7 @@ pub struct Replica {
 }
 
 /// The replication coordinator
+#[allow(dead_code)]
 pub struct Replicator {
     ralph_binary: PathBuf,
     global_memory_path: PathBuf,

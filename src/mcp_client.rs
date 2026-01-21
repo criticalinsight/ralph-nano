@@ -9,6 +9,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
 #[derive(Debug, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct McpRequest {
     pub jsonrpc: String,
     pub method: String,
@@ -17,6 +18,7 @@ pub struct McpRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct McpResponse {
     pub jsonrpc: String,
     pub result: Option<Value>,
@@ -25,12 +27,14 @@ pub struct McpResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[allow(dead_code)]
 pub struct McpTool {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
 }
 
+#[allow(dead_code)]
 pub struct McpClient {
     _child: Child,
     stdin: Arc<Mutex<tokio::process::ChildStdin>>,
@@ -142,6 +146,7 @@ impl McpClient {
     }
 }
 
+#[allow(dead_code)]
 pub struct McpManager {
     clients: Vec<(String, McpClient)>,
 }

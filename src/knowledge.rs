@@ -1,6 +1,6 @@
-use crate::memory::Memory;
-// use cozo::DataValue;
+use crate::memory_legacy::Memory;
 use anyhow::{anyhow, Result};
+use regex::Regex;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -204,10 +204,118 @@ impl KnowledgeEngine {
             eprintln!("Rust doc ingestion warning: {}", e);
         }
 
-        // 2. Scan for top-level READMEs and architectural docs
-        // (Future: Add Node.js and Python specific scans here)
+        // 2. Scan for local files
+        let walker = walkdir::WalkDir::new(path)
+            .into_iter()
+            .filter_entry(|e| {
+                let name = e.file_name().to_str().unwrap_or("");
+                !name.starts_with('.') && name != "target" && name != "node_modules"
+            });
+
+        for entry in walker.filter_map(|e| e.ok()) {
+            if entry.file_type().is_file() {
+                let _ = self.ingest_file(entry.path()).await;
+            }
+        }
 
         Ok(())
+    }
+
+    pub async fn ingest_file(&self, path: &Path) -> Result<()> {
+        if !path.is_file() {
+            return Ok(());
+        }
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+
+        // Skip if not code/markdown
+        if !matches!(ext, "rs" | "js" | "ts" | "py" | "md" | "txt") {
+            return Ok(());
+        }
+
+        let content = fs::read_to_string(path)?;
+
+        // 1. Check sync status
+        let mut hasher = Sha256::new();
+        hasher.update(content.as_bytes());
+        let current_hash = hex::encode(hasher.finalize());
+        let path_str = path.to_str().unwrap_or_default();
+
+        if let Ok(Some((_, old_hash))) = self.memory.check_sync_status(path_str).await {
+            if old_hash == current_hash {
+                return Ok(());
+            }
+        }
+
+        println!("📝 Re-indexing changed file: {}", path_str);
+
+        // 2. Extract Symbols
+        let symbols = self.extract_symbols(&content, ext);
+        for mut node in symbols {
+            node.path = path_str.to_string();
+            if let Err(e) = self.memory.add_node(&node).await {
+                eprintln!("Failed to add node {}: {}", node.id, e);
+            }
+        }
+
+        self.memory.update_sync_status(path_str, &current_hash).await?;
+        Ok(())
+    }
+
+    fn extract_symbols(&self, content: &str, ext: &str) -> Vec<crate::memory_legacy::GraphNode> {
+        use crate::memory_legacy::GraphNode;
+        let mut nodes = Vec::new();
+
+        // Very basic regex-based extraction for Godmode v2.4
+        // In a real system we'd use tree-sitter or syn/swc
+        match ext {
+            "rs" => {
+                let re_fn = regex::Regex::new(r"pub\s+fn\s+([a-zA-Z0-9_]+)").unwrap();
+                let re_struct = regex::Regex::new(r"pub\s+struct\s+([a-zA-Z0-9_]+)").unwrap();
+
+                for cap in re_fn.captures_iter(content) {
+                    nodes.push(GraphNode {
+                        id: format!("fn:{}", &cap[1]),
+                        content: format!("Function definition: {}", &cap[0]),
+                        node_type: "fn".to_string(),
+                        path: String::new(),
+                        edges: Vec::new(),
+                    });
+                }
+                for cap in re_struct.captures_iter(content) {
+                    nodes.push(GraphNode {
+                        id: format!("struct:{}", &cap[1]),
+                        content: format!("Struct definition: {}", &cap[0]),
+                        node_type: "struct".to_string(),
+                        path: String::new(),
+                        edges: Vec::new(),
+                    });
+                }
+            }
+            "py" => {
+                let re_fn = regex::Regex::new(r"def\s+([a-zA-Z0-9_]+)\(").unwrap();
+                for cap in re_fn.captures_iter(content) {
+                    nodes.push(GraphNode {
+                        id: format!("py_fn:{}", &cap[1]),
+                        content: format!("Python function: Def {}", &cap[1]),
+                        node_type: "fn".to_string(),
+                        path: String::new(),
+                        edges: Vec::new(),
+                    });
+                }
+            }
+            "md" => {
+                nodes.push(GraphNode {
+                    id: format!("doc:{}", content.len()),
+                    content: content.chars().take(500).collect(),
+                    node_type: "doc".to_string(),
+                    path: String::new(),
+                    edges: Vec::new(),
+                });
+            }
+            _ => {}
+        }
+
+        nodes
     }
 
     pub async fn ingest_rust_docs_from_path(&self, path: &Path) -> Result<()> {
@@ -394,13 +502,14 @@ impl KnowledgeEngine {
             };
 
             for element in doc.select(&selector) {
-                let text = html2text::from_read(element.html().as_bytes(), 80);
-                full_text.push_str(&text);
-                full_text.push_str("\n\n");
+                if let Ok(text) = html2text::from_read(element.html().as_bytes(), 80) {
+                    full_text.push_str(&text);
+                    full_text.push_str("\n\n");
+                }
             }
 
             if full_text.is_empty() {
-                full_text = html2text::from_read(html.as_bytes(), 80);
+                full_text = html2text::from_read(html.as_bytes(), 80).unwrap_or_default();
             }
         }
 
@@ -471,20 +580,68 @@ impl KnowledgeEngine {
     }
 
     pub async fn check_library_updates(&self) -> Result<Vec<(String, String, String)>> {
-        let known_libs = self.memory.get_known_libraries().await?;
+        let known_libs = self.memory.get_known_libraries_with_versions().await?;
         let mut updates = Vec::new();
 
-        for lib_name in known_libs {
+        for (lib_name, local_version) in known_libs {
             // Hardcoded check for docs.rs (Rust) for now as MVP
             if let Ok(latest) = self
                 .check_upstream_version(&lib_name, LibraryType::Rust)
                 .await
             {
-                // In a real scenario, we'd store the local version and compare.
-                updates.push((lib_name, "locally_cached".to_string(), latest));
+                updates.push((lib_name, local_version, latest));
             }
         }
         Ok(updates)
+    }
+
+    pub async fn upgrade_manifest(&self, updates: &Vec<(String, String, String)>) -> Result<()> {
+        // Upgrade Cargo.toml
+        if let Err(e) = self.upgrade_rust_manifest(updates).await {
+            eprintln!("Rust upgrade error: {}", e);
+        }
+        Ok(())
+    }
+
+    pub async fn sync_libraries(&self, libs: &[DetectedLibrary]) -> Result<()> {
+        for lib in libs {
+            if let Err(e) = self.memory.register_library(&lib.name, &lib.version).await {
+                eprintln!("Failed to sync library {}: {}", lib.name, e);
+            }
+        }
+        Ok(())
+    }
+
+    async fn upgrade_rust_manifest(&self, updates: &Vec<(String, String, String)>) -> Result<()> {
+        let path = "Cargo.toml";
+        if !Path::new(path).exists() { return Ok(()); }
+        let mut content = fs::read_to_string(path)?;
+        let mut changed = false;
+
+        for (name, _local, latest) in updates {
+            // Pattern 1: name = "version"
+            let re1_str = format!(r#"(?m)^(?P<prefix>\s*{}\s*=\s*")[\d\.]+"#, regex::escape(name));
+            if let Ok(re1) = Regex::new(&re1_str) {
+                if re1.is_match(&content) {
+                    content = re1.replace_all(&content, format!("${{prefix}}{}", latest)).to_string();
+                    changed = true;
+                }
+            }
+
+            // Pattern 2: name = { version = "version", ... }
+            let re2_str = format!(r#"(?P<prefix>{}\s*=\s*\{{[^}}]*version\s*=\s*")[\d\.]+"#, regex::escape(name));
+            if let Ok(re2) = Regex::new(&re2_str) {
+                if re2.is_match(&content) {
+                    content = re2.replace_all(&content, format!("${{prefix}}{}", latest)).to_string();
+                    changed = true;
+                }
+            }
+        }
+
+        if changed {
+            fs::write(path, content)?;
+        }
+        Ok(())
     }
 
     fn prune_linguistics(&self, text: &str) -> String {
