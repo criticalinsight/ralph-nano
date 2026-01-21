@@ -43,13 +43,14 @@ graph TD
 
 ## Component Breakdown
 
-### 1. `ContextCannon` (The Sensor)
-- **Role**: Perception. It "sees" the codebase.
-- **Implementation**: Uses `walkdir` to recursively scan the current directory.
-- **Logic**:
-  - Filtering: Ignores directories defined in `SKIP_DIRS` (e.g., `.git`, `node_modules`).
-  - Filtering: Only includes files with extensions in `INCLUDE_EXTENSIONS`.
-  - Formatting: Concatenates files into a standardized XML-like format for the LLM.
+### 1. `Tools Module` (The Hands & Eyes)
+- **Role**: Context Gathering and Execution.
+- **Location**: `src/tools.rs`.
+- **Implementation**: Encapsulates file system operations, context scanning (`walkdir`), and symbol extraction (`syn`, `regex`).
+- **Key Functions**:
+  - `scan_workspace`: Recursively builds context, adhering to `.ralph` skip lists.
+  - `scan_symbols`: Extracts function/struct signatures for the "Symbol Cannon".
+  - `exec_shell`: Safely executes shell commands with user/autonomous checks.
 
 ### 2. `ShadowWorkspace` (The Sandbox)
 - **Role**: Safe Speculation.
@@ -99,7 +100,7 @@ graph TD
 - **Role**: Coordination and Oversight.
 - **Implementation**: Infinite loop with Dual Role support and Pro-only inference.
 - **Supervisor Features**:
-    - **Symbol Cannon**: Replaces full workspace scan with a high-level symbol hierarchy (signatures). Enhanced with robust error handling, silent fallbacks for parse failures, and cached mtime verification.
+    - **Symbol Scanning**: Leverages `Tools::scan_symbols` to provide high-level signatures instead of full text for large codebases.
     - **Structured Directives**: Enforces JSON communication (`{ "directives": [...] }`).
     - **Task Compression**: prunes `TASKS.md` to keep context focused.
 
