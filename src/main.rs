@@ -508,19 +508,25 @@ impl IncrementalParser {
     fn push(&mut self, token: &str) -> Vec<Action> {
         self.buffer.push_str(token);
         let mut actions = Vec::new();
-        let master_re =
-            Regex::new(r"```(?P<lang>\w+)?\s*(?P<header>.*)\n(?P<content>[\s\S]*?)```").unwrap();
+        let master_re = match Regex::new(r"```(?P<lang>\w+)?\s*(?P<header>.*)\n(?P<content>[\s\S]*?)```") {
+            Ok(re) => re,
+            Err(e) => {
+                eprintln!("Cannon Warning: Failed to compile master regex: {}", e);
+                return actions;
+            }
+        };
 
         // Scan new content
         let sub_buffer = &self.buffer[self.processed_index..];
         for cap in master_re.captures_iter(sub_buffer) {
-            let full_match = cap.get(0).unwrap();
-            let block_str = full_match.as_str();
+            if let Some(full_match) = cap.get(0) {
+                let block_str = full_match.as_str();
 
-            let block_actions = extract_code_blocks(block_str);
-            actions.extend(block_actions);
+                let block_actions = extract_code_blocks(block_str);
+                actions.extend(block_actions);
 
-            self.processed_index += full_match.end();
+                self.processed_index += full_match.end();
+            }
         }
         actions
     }
@@ -752,8 +758,11 @@ impl Tools {
         let client = reqwest::Client::new();
         let body = client.get(url).send().await?.text().await?;
         // Simple HTML to text (keep it Nano)
-        let re = Regex::new(r"<[^>]*>").unwrap();
-        let text = re.replace_all(&body, " ").to_string();
+        let text = if let Ok(re) = Regex::new(r"<[^>]*>") {
+            re.replace_all(&body, " ").to_string()
+        } else {
+            body // Fallback: return raw HTML if regex fails
+        };
         Ok(text)
     }
 
@@ -1133,7 +1142,10 @@ impl Security {
     fn scan_git_diff() -> Result<()> {
         let output = Command::new("git").args(["diff", "--cached"]).output()?;
         let diff = String::from_utf8_lossy(&output.stdout);
-        let google_re = Regex::new(r"AIzaSy[A-Za-z0-9-_]{33}").unwrap();
+        let google_re = match Regex::new(r"AIzaSy[A-Za-z0-9-_]{33}") {
+            Ok(re) => re,
+            Err(_) => return Ok(()), // Regex fail -> assume safe (fail open to avoid blocking git)
+        };
         if google_re.is_match(&diff) {
             return Err(anyhow::anyhow!(
                 "🚨 SECURITY ALERT: Google API Key detected in git staging! Operation aborted."
@@ -1163,7 +1175,13 @@ enum Action {
 
 fn extract_code_blocks(response: &str) -> Vec<Action> {
     let mut actions = Vec::new();
-    let master_re = Regex::new(r"```(\w+)?\s*(.*)\n([\s\S]*?)```").unwrap();
+    let master_re = match Regex::new(r"```(\w+)?\s*(.*)\n([\s\S]*?)```") {
+        Ok(re) => re,
+        Err(e) => {
+            eprintln!("Cannon Error: Failed to compile response regex: {}", e);
+            return actions;
+        }
+    };
     let known_langs = [
         "rust",
         "python",

@@ -29,7 +29,10 @@ Output ONLY the HEURISTIC lines, nothing else."#
 
     /// Parses the LLM response and extracts heuristics.
     pub fn parse_heuristics(response: &str) -> Vec<String> {
-        let re = Regex::new(r"(?m)^HEURISTIC:\s*(.+)$").unwrap();
+        let re = match Regex::new(r"(?m)^HEURISTIC:\s*(.+)$") {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
         re.captures_iter(response)
             .filter_map(|cap| cap.get(1).map(|m| m.as_str().trim().to_string()))
             .collect()
