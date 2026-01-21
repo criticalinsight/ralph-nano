@@ -247,20 +247,23 @@ impl KnowledgeEngine {
         let html = res.text().await?;
 
         // 2. Discover modules (Drop doc before await)
-        let mut urls_to_process = {
+        let mut urls_to_process = vec![base_url.clone()];
+        {
             let doc = Html::parse_document(&html);
-            let mod_selector = Selector::parse(".module-item a.mod, .item-left a.mod").unwrap();
-            let mut urls = vec![base_url.clone()];
-            let parsed_base_url = Url::parse(&base_url)?;
-            for link in doc.select(&mod_selector) {
-                if let Some(href) = link.value().attr("href") {
-                    if let Ok(abs_url) = parsed_base_url.join(href) {
-                        urls.push(abs_url.to_string());
+            if let Ok(mod_selector) = Selector::parse(".module-item a.mod, .item-left a.mod") {
+                if let Ok(parsed_base_url) = Url::parse(&base_url) {
+                    for link in doc.select(&mod_selector) {
+                        if let Some(href) = link.value().attr("href") {
+                            if let Ok(abs_url) = parsed_base_url.join(href) {
+                                urls_to_process.push(abs_url.to_string());
+                            }
+                        }
                     }
                 }
+            } else {
+                eprintln!("Cannon Warning: Failed to parse module selector for {}", base_url);
             }
-            urls
-        };
+        }
 
         // 3. Concurrent ingestion (limit to 5 URLs total for Nano scale)
         urls_to_process.truncate(5); // Limit to 5 URLs total for Nano scale
@@ -382,7 +385,13 @@ impl KnowledgeEngine {
                 LibraryType::Node => "#readme, .package-description-section",
                 LibraryType::Python => "#description, .project-description",
             };
-            let selector = Selector::parse(selector_str).unwrap();
+            let selector = match Selector::parse(selector_str) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Selector parse error: {}", e);
+                    return Ok(());
+                }
+            };
 
             for element in doc.select(&selector) {
                 let text = html2text::from_read(element.html().as_bytes(), 80);

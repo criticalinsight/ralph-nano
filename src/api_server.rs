@@ -272,7 +272,7 @@ async fn handle_websocket(mut socket: WebSocket, _state: SharedState) {
         "type": "connected",
         "message": "Ralph-Nano WebSocket API"
     }))
-    .unwrap();
+    .unwrap_or_default();
     let _ = socket.send(Message::Text(welcome_msg.into())).await;
 
     // Handle incoming messages
@@ -307,7 +307,7 @@ async fn handle_websocket(mut socket: WebSocket, _state: SharedState) {
                     }
                 };
 
-                let resp_str = serde_json::to_string(&response).unwrap();
+                let resp_str = serde_json::to_string(&response).unwrap_or_default();
                 let _ = socket.send(Message::Text(resp_str.into())).await;
             }
         }
