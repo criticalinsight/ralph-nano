@@ -63,9 +63,10 @@ Example:
     pub fn parse_response(response: &str) -> Vec<LintViolation> {
         // Extract JSON from code blocks if present
         let json_str = if let Some(start) = response.find("```json") {
-            if let Some(end) = response[start..].find("```") {
-                let s = &response[start..][..end];
-                s.trim_start_matches("```json").trim()
+            let code_start = start + 7; // Skip "```json"
+            if let Some(end) = response[code_start..].find("```") {
+                let s = &response[code_start..][..end];
+                s.trim()
             } else {
                 response
             }

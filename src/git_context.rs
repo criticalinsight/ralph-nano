@@ -140,7 +140,7 @@ impl GitContext {
                     // Collect recent commits
                     if commits.len() < max_commits {
                         commits.push(CommitSummary {
-                            hash: oid.to_string()[..8].to_string(),
+                            hash: oid.to_string().chars().take(8).collect(),
                             message: commit
                                 .message()
                                 .unwrap_or("")
@@ -196,7 +196,7 @@ impl GitContext {
             blame_info.push(BlameInfo {
                 line: line_num + 1,
                 author: sig.name().unwrap_or("Unknown").to_string(),
-                commit: commit_id.to_string()[..8].to_string(),
+                commit: commit_id.to_string().chars().take(8).collect(),
                 date: Utc
                     .timestamp_opt(sig.when().seconds(), 0)
                     .single()
@@ -224,7 +224,7 @@ impl GitContext {
             let time = commit.time();
 
             commits.push(CommitSummary {
-                hash: oid.to_string()[..8].to_string(),
+                hash: oid.to_string().chars().take(8).collect(),
                 message: commit
                     .message()
                     .unwrap_or("")

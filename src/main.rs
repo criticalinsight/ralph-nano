@@ -271,8 +271,13 @@ impl Cortex {
 
                 match serde_json::from_str::<serde_json::Value>(sanitized) {
                     Ok(val) => {
-                        let text = val["candidates"][0]["content"]["parts"][0]["text"]
-                            .as_str()
+                        let text = val.get("candidates")
+                            .and_then(|c| c.get(0))
+                            .and_then(|c| c.get("content"))
+                            .and_then(|c| c.get("parts"))
+                            .and_then(|p| p.get(0))
+                            .and_then(|p| p.get("text"))
+                            .and_then(|t| t.as_str())
                             .unwrap_or("")
                             .to_string();
                         text
